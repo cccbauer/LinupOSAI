@@ -364,7 +364,9 @@ class LinupApp:
         inv_id = self.current_investment_id or 0
         conn   = self._get_conn()
         if not conn:
-            return
+            return False, "No database connection"
+        
+        error_msg = None
         try:
             cursor  = conn.cursor()
             cursor.execute(
@@ -398,8 +400,14 @@ class LinupApp:
                                 'bank_start', 'bank_end', 'profit', 'profit_pct'])
                 w.writerow([inv_id, session_num, date_str, mesa,
                             bank_start, bank_end, profit, profit_pct])
-        except Exception:
-            pass
+            return True, None
+        except Exception as e:
+            error_msg = str(e)
+            import traceback
+            with open("/tmp/linup_session_save_error.log", "a") as f:
+                f.write(f"Session save error: {error_msg}\n")
+                traceback.print_exc(file=f)
+            return False, error_msg
         finally:
             conn.close()
 
@@ -965,6 +973,7 @@ class LinupApp:
                            inv_type: str = 'FIAT'):
         conn = self._get_conn()
         inv_id = None
+        error_msg = None
         if conn:
             try:
                 fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -994,14 +1003,71 @@ class LinupApp:
                             (inv_id, mesa_name, round(init_bank, 2))
                         )
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                error_msg = str(e)
+                import traceback
+                with open("/tmp/linup_investment_error.log", "a") as f:
+                    f.write(f"Investment creation error: {error_msg}\n")
+                    traceback.print_exc(file=f)
+                inv_id = None
             finally:
                 conn.close()
+        
+        # Show result to user
         if inv_id:
-            self.show_investment_dashboard(inv_id)
+            # Show success confirmation
+            dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+            def go_to_dashboard(e):
+                dlg.open = False
+                dlg.update()
+                self.show_investment_dashboard(inv_id)
+            
+            dlg.title = ft.Text("✅ Investment Created", color='#2ecc71', 
+                               weight=ft.FontWeight.BOLD)
+            dlg.content = ft.Column(tight=True, controls=[
+                ft.Text(f"Investment '{inv_name}' saved successfully!", 
+                       color=ft.Colors.WHITE),
+                ft.Container(height=8),
+                ft.Text(f"Capital: ${capital:,.2f}", 
+                       color='#2ecc71', weight=ft.FontWeight.BOLD, size=13),
+                ft.Container(height=12),
+                ft.Text(f"Tables: {len(tables_data)}", 
+                       color='#cccccc', size=11),
+            ])
+            dlg.actions = [
+                ft.ElevatedButton("Start Trading", on_click=go_to_dashboard, 
+                                style=ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.BLACK),
+                                expand=True)
+            ]
+            dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+            self.page.show_dialog(dlg)
         else:
-            self.show_main_menu()
+            if error_msg:
+                dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+                def close_dlg(e):
+                    dlg.open = False
+                    dlg.update()
+                    self.show_main_menu()
+                
+                dlg.title = ft.Text("Error Creating Investment", color='#ff4444', 
+                                   weight=ft.FontWeight.BOLD)
+                dlg.content = ft.Column(tight=True, controls=[
+                    ft.Text("Investment could not be saved:", color=ft.Colors.WHITE),
+                    ft.Container(height=8),
+                    ft.Text(error_msg, color='#ff9999', size=12, 
+                           text_align=ft.TextAlign.CENTER),
+                    ft.Container(height=12),
+                    ft.Text("Check that database is writable.", 
+                           color='#cccccc', size=11),
+                ])
+                dlg.actions = [
+                    ft.ElevatedButton("Back", on_click=close_dlg, 
+                                    style=ft.ButtonStyle(bgcolor='#555', color=ft.Colors.WHITE))
+                ]
+                dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+                self.page.show_dialog(dlg)
+            else:
+                self.show_main_menu()
 
     # ──────────────────────────────────────────────────────────────────
     # INVESTMENT DASHBOARD
@@ -2318,10 +2384,53 @@ class LinupApp:
             self._go_home()
 
         def guardar(ev):
-            self._save_compound_session()
+            ok, err = self._save_compound_session()
             dlg.open = False
             dlg.update()
-            self._go_home()
+            
+            if not ok:
+                # Show error dialog
+                err_dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+                def close_err(e):
+                    err_dlg.open = False
+                    err_dlg.update()
+                    self._go_home()
+                
+                err_dlg.title = ft.Text("⚠️ Save Error", color='#ff4444', weight=ft.FontWeight.BOLD)
+                err_dlg.content = ft.Column(tight=True, controls=[
+                    ft.Text("Session could not be saved:", color=ft.Colors.WHITE),
+                    ft.Container(height=8),
+                    ft.Text(err or "Unknown error", color='#ff9999', size=11),
+                ])
+                err_dlg.actions = [
+                    ft.ElevatedButton("Back", on_click=close_err,
+                                    style=ft.ButtonStyle(bgcolor='#555', color=ft.Colors.WHITE),
+                                    expand=True)
+                ]
+                err_dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+                self.page.show_dialog(err_dlg)
+            else:
+                # Show success
+                suc_dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+                def close_suc(e):
+                    suc_dlg.open = False
+                    suc_dlg.update()
+                    self._go_home()
+                
+                suc_dlg.title = ft.Text("✅ Session Saved", color='#2ecc71', weight=ft.FontWeight.BOLD)
+                suc_dlg.content = ft.Column(tight=True, controls=[
+                    ft.Text("Investment session registered successfully!", color=ft.Colors.WHITE),
+                    ft.Container(height=8),
+                    ft.Text(f"P/L: {signo}{self._fmt_bank(profit)} ({signo}{pl_pct:.1f}%)",
+                           color=color, weight=ft.FontWeight.BOLD),
+                ])
+                suc_dlg.actions = [
+                    ft.ElevatedButton("Back to Dashboard", on_click=close_suc,
+                                    style=ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.BLACK),
+                                    expand=True)
+                ]
+                suc_dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+                self.page.show_dialog(suc_dlg)
 
         dlg.title = ft.Text(
             f"SUMMARY  {self.nombre_mesa}",
