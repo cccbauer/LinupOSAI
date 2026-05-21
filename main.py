@@ -6,6 +6,16 @@ import math
 import random
 from datetime import datetime
 import asyncio
+import uuid
+
+# AI Learning System imports
+from ai_sessions import SessionRepository
+from ai_patterns import PatternDetector
+from ai_analysis import PatternAnalyzer
+from ai_recommendations import RecommendationEngine
+from ai_decision_tracker import DecisionTracker, Decision
+from ai_learning_engine import LearningEngine
+from ai_adaptive_recommender import AdaptiveRecommender
 
 # --- GROUP CONFIGURATION ---
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -133,7 +143,41 @@ class LinupApp:
         self.show_splash()
         self.init_db()
         self.reset_variables()
+        self._init_ai_systems()  # Initialize AI learning system
         self.page.run_task(self._after_splash)
+
+    def _init_ai_systems(self):
+        """Initialize AI decision tracking and learning system."""
+        try:
+            # Initialize session repository for pattern storage
+            self.session_repo = SessionRepository(db_path=self.db_path)
+            
+            # Initialize decision tracker for learning
+            self.decision_tracker = DecisionTracker(db_path=self.db_path)
+            
+            # Initialize pattern detection
+            self.pattern_detector = PatternDetector(GRUPOS_MAESTROS, WHEEL_NEIGHBORS)
+            self.pattern_analyzer = PatternAnalyzer(self.session_repo)
+            self.recommendation_engine = RecommendationEngine(
+                self.pattern_detector, self.pattern_analyzer, GRUPOS_MAESTROS
+            )
+            
+            # Initialize learning engine
+            self.learning_engine = LearningEngine(self.decision_tracker)
+            
+            # Initialize adaptive recommender
+            self.adaptive_recommender = AdaptiveRecommender(
+                self.recommendation_engine, self.learning_engine, self.decision_tracker
+            )
+            
+            # Tracking variables
+            self.current_decision_id = None
+            self.current_spin_number = 0
+            self.ai_init_success = True
+        except Exception as e:
+            print(f"AI initialization warning: {e}")
+            self.ai_init_success = False
+            # App continues without AI if init fails
 
     async def _after_splash(self):
         await asyncio.sleep(2.0)
@@ -2367,6 +2411,17 @@ class LinupApp:
             bgcolor='#1e1e1e', padding=5,
             content=ft.Row(controls=[self.lbl_bank, self.lbl_inv, self.lbl_pl]),
         )
+        
+        # ── AI Info display ────────────────────────────────────────────
+        self.lbl_ai_info = ft.Text(
+            self._get_ai_info_display(),
+            color='#9b59b6', weight=ft.FontWeight.BOLD, size=10,
+            text_align=ft.TextAlign.CENTER,
+        )
+        ai_bar = ft.Container(
+            bgcolor='#2a2a3e', padding=4,
+            content=self.lbl_ai_info,
+        ) if self.ai_init_success else None
 
         # ── Progression ON/OFF + fixed multiplier bar ─────────────────────
         self.prog_on     = True
@@ -2722,7 +2777,7 @@ class LinupApp:
                     expand=True, spacing=0,
                     controls=inv_bar_controls + [
                         stats_bar, prog_bar, sug_bar,
-                    ] + ([rb_bar] if rb_bar else []) + [
+                    ] + ([ai_bar] if ai_bar else []) + ([rb_bar] if rb_bar else []) + [
                         mixer_box, ctrl_bar,
                         ft.Container(
                             expand=True,
@@ -2998,6 +3053,21 @@ class LinupApp:
                 self.activa         = False
                 self.grupos_activos = []
                 self.limpiar_seleccion_visual()
+                
+                # Record decision outcome for learning system
+                if self.ai_init_success and self.current_decision_id:
+                    try:
+                        outcome = 'win' if is_win else 'loss'
+                        profit_loss = self.last_bank_delta
+                        self.decision_tracker.record_outcome(
+                            decision_id=self.current_decision_id,
+                            spin_result=num,
+                            outcome=outcome,
+                            profit_loss=profit_loss
+                        )
+                        self.current_decision_id = None
+                    except Exception:
+                        pass  # Silently fail if tracking fails
             else:
                 if self.free_spin_mode:
                     # Red + Black: net 0 unless 0 falls (lose both)
@@ -3441,6 +3511,35 @@ class LinupApp:
         self.update_inv_label()
         self.lbl_inv.update()
         self.update_ui()   # immediately reflect pending bet in P/L
+        
+        # Record decision for learning system
+        if self.ai_init_success and self.grupos_activos:
+            try:
+                self.current_spin_number = len(self.history_nums)
+                self.current_decision_id = str(uuid.uuid4())
+                
+                total_cost, _ = self._compute_bet()
+                bet_targets = ', '.join(self.grupos_activos)
+                bet_type = 'group' if len(self.grupos_activos) > 1 else 'number'
+                
+                decision = Decision(
+                    decision_id=self.current_decision_id,
+                    session_id=self.session_id or 0,
+                    spin_number=self.current_spin_number,
+                    bet_target=bet_targets,
+                    bet_type=bet_type,
+                    bet_amount=total_cost,
+                    decision_context={
+                        'confidence': 0.6,
+                        'reason': 'Manual decision by player',
+                        'groups_count': len(self.grupos_activos),
+                    },
+                    source='manual',
+                    decision_time=datetime.now(),
+                )
+                self.decision_tracker.record_decision(decision)
+            except Exception as e:
+                pass  # Silently fail if tracking fails
 
     def _check_pre_bet_warning(self, on_confirm):
         """Show warning if losing this bet would breach 45% stop loss."""
@@ -3541,6 +3640,25 @@ class LinupApp:
             self._proceed_bet()
         else:
             self._show_roulette_chip_popup(self._proceed_bet)
+
+    def _get_ai_info_display(self) -> str:
+        """Get AI recommendations and player profile for display."""
+        if not self.ai_init_success or len(self.history_nums) < 3:
+            return "AI: Learning..."
+        try:
+            profile = self.learning_engine.get_player_profile()
+            win_rate = profile.get('statistics', {}).get('win_rate', 0)
+            best_targets = profile.get('best_targets', [])
+            
+            if best_targets:
+                best_bet = best_targets[0] if isinstance(best_targets, list) else best_targets
+                rate_str = f"{best_bet.get('target', '?')}: {best_bet.get('win_rate', 0):.0%}" if isinstance(best_bet, dict) else str(best_bet)
+            else:
+                rate_str = "Learning..."
+                
+            return f"AI 🧠 {rate_str} | WR:{win_rate:.0%}"
+        except Exception:
+            return "AI: Active"
 
     # ──────────────────────────────────────────────────────────────────
     # SUGGESTIONS
@@ -3740,6 +3858,14 @@ class LinupApp:
             total_pl = self.inv_other_pl + pl
             self.lbl_inv_pl.value = f"P/L: {total_pl:+.2f}"
             self.lbl_inv_pl.color = '#2ecc71' if total_pl >= 0 else '#ff4444'
+        
+        # Update AI info display (every few spins to avoid slowdown)
+        if self.ai_init_success and hasattr(self, 'lbl_ai_info') and len(self.history_nums) % 5 == 0:
+            try:
+                self.lbl_ai_info.value = self._get_ai_info_display()
+            except Exception:
+                pass
+        
         self.page.update()
         self._check_stop_loss()
 
