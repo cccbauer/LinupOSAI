@@ -3642,10 +3642,25 @@ class LinupApp:
             self._show_roulette_chip_popup(self._proceed_bet)
 
     def _get_ai_info_display(self) -> str:
-        """Get AI recommendations and player profile for display."""
-        if not self.ai_init_success or len(self.history_nums) < 3:
-            return "AI: Learning..."
+        """Get AI recommendations and player profile for display with training progress."""
+        if not self.ai_init_success:
+            return "AI: Initializing..."
+        
         try:
+            # Get total decisions made from decision tracker stats
+            stats = self.decision_tracker.get_decision_stats()
+            total_decisions = stats.get('total_decisions', 0)
+            
+            # Minimum decisions needed for reliable AI recommendations
+            MIN_DECISIONS = 20
+            
+            if total_decisions < MIN_DECISIONS:
+                # Show training progress
+                progress_pct = int((total_decisions / MIN_DECISIONS) * 100)
+                remaining = max(0, MIN_DECISIONS - total_decisions)
+                return f"AI 🧠 Training: {progress_pct}% ({remaining} more decisions)"
+            
+            # Enough data - show recommendations
             profile = self.learning_engine.get_player_profile()
             win_rate = profile.get('statistics', {}).get('win_rate', 0)
             best_targets = profile.get('best_targets', [])
