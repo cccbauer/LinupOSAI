@@ -1,0 +1,16 @@
+[project]
+name = "LinupOSAI"
+version = "17.1.0-AI"
+description = "Linup Roulette Tracker - AI Edition"
+requires-python = ">=3.10"
+dependencies = ["flet>=0.25.0"]
+
+[tool.flet]
+org = "com.linup"
+product = "Linup"
+company = "Linup"
+icon = "icon.png"
+bundle_id = "com.linup.app"
+
+[tool.flet.macos]
+minimum_version = "12.0"

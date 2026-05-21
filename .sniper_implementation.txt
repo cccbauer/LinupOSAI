@@ -1,0 +1,28 @@
+SNIPER MODE IMPLEMENTATION PLAN
+
+1. Helper method to compute safety levels:
+def _compute_safety_levels(self):
+    """Compute safety level for each number (how many groups hit it)"""
+    levels = {}
+    for num in range(0, 37):
+        count = sum(1 for g in self.grupos_activos if num in GRUPOS_MAESTROS[g])
+        levels[num] = count
+    return levels
+
+2. Modify _show_roulette_chip_popup to:
+   - Compute all_nums as intersection if sniper_mode is ON
+   - Compute safety levels if sniper_mode is OFF
+   - Add safety level picker in popup when sniper_mode is OFF
+   - Color cells based on safety level (1=red, 2=orange, 3=yellow, 4=green, 5=blue)
+
+3. Safety level color map:
+   1: '#e74c3c' (red)
+   2: '#e67e22' (orange)
+   3: '#f39c12' (yellow)
+   4: '#27ae60' (green)
+   5: '#3498db' (blue)
+
+4. When filtering by safety level:
+   - User picks level 1-5
+   - Show only chips >= that level
+   - Recalculate total cost based on filtered chips
