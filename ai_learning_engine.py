@@ -9,6 +9,7 @@ import hashlib
 import json
 from datetime import datetime
 import statistics
+import sqlite3
 
 class LearningEngine:
     """Learns from player decisions and builds adaptive models"""
@@ -431,32 +432,34 @@ class LearningEngine:
             duration_minutes: How long investment was active
             mesa_types: Types of tables used in this investment
         """
-        if not hasattr(self.tracker, 'conn'):
+        if not hasattr(self.tracker, 'db_path'):
             return
         
         try:
             roi = (profit_loss / capital * 100) if capital > 0 else 0
             is_win = 1 if profit_loss >= 0 else 0
             
+            conn = sqlite3.connect(self.tracker.db_path)
+            cursor = conn.cursor()
+            
             # Record in a learned_investments table
-            self.tracker.conn.execute(
+            cursor.execute(
                 "CREATE TABLE IF NOT EXISTS learned_investments "
                 "(id INTEGER PRIMARY KEY, investment_id INTEGER, "
                 " profit_loss REAL, capital REAL, roi REAL, is_win INTEGER, "
-                " duration_minutes INTEGER, mesa_types TEXT, recorded_at TEXT)",
-                timeout=5
+                " duration_minutes INTEGER, mesa_types TEXT, recorded_at TEXT)"
             )
             
-            self.tracker.conn.execute(
+            cursor.execute(
                 "INSERT INTO learned_investments "
                 "(investment_id, profit_loss, capital, roi, is_win, duration_minutes, mesa_types, recorded_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (investment_id, profit_loss, capital, roi, is_win, 
                  duration_minutes, json.dumps(mesa_types or []), 
-                 datetime.now().isoformat()),
-                timeout=5
+                 datetime.now().isoformat())
             )
-            self.tracker.conn.commit()
+            conn.commit()
+            conn.close()
         except Exception:
             pass
     
@@ -468,10 +471,11 @@ class LearningEngine:
             Investment performance statistics
         """
         try:
-            if not hasattr(self.tracker, 'conn'):
-                return {'status': 'no_connection'}
+            if not hasattr(self.tracker, 'db_path'):
+                return {'status': 'no_db_path'}
             
-            cursor = self.tracker.conn.cursor()
+            conn = sqlite3.connect(self.tracker.db_path)
+            cursor = conn.cursor()
             
             # Get all recorded investments
             cursor.execute(
@@ -479,6 +483,7 @@ class LearningEngine:
                 "FROM learned_investments ORDER BY recorded_at DESC"
             )
             investments = cursor.fetchall()
+            conn.close()
             
             if not investments:
                 return {'status': 'no_data', 'total_investments': 0}

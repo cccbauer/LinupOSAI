@@ -2426,7 +2426,7 @@ class LinupApp:
                 self.page.show_dialog(err_dlg)
             else:
                 # Record investment outcome for learning
-                if self.current_investment_id and self.learning_engine and hasattr(self.learning_engine.tracker, 'conn'):
+                if self.current_investment_id and self.learning_engine:
                     try:
                         self.learning_engine.record_investment_outcome(
                             investment_id=self.current_investment_id,
