@@ -413,3 +413,150 @@ class LearningEngine:
             tips.append(f"You perform best with {best_tier[0]} bets - adjust your bet sizing accordingly")
         
         return tips
+    
+    # ──────────────────────────────────────────────────────────────────
+    # INVESTMENT LEARNING
+    # ──────────────────────────────────────────────────────────────────
+    
+    def record_investment_outcome(self, investment_id: int, profit_loss: float, 
+                                 capital: float, duration_minutes: int = 0,
+                                 mesa_types: List[str] = None) -> None:
+        """
+        Record investment outcome for learning
+        
+        Args:
+            investment_id: Investment ID
+            profit_loss: Total profit/loss from investment
+            capital: Initial capital invested
+            duration_minutes: How long investment was active
+            mesa_types: Types of tables used in this investment
+        """
+        if not hasattr(self.tracker, 'conn'):
+            return
+        
+        try:
+            roi = (profit_loss / capital * 100) if capital > 0 else 0
+            is_win = 1 if profit_loss >= 0 else 0
+            
+            # Record in a learned_investments table
+            self.tracker.conn.execute(
+                "CREATE TABLE IF NOT EXISTS learned_investments "
+                "(id INTEGER PRIMARY KEY, investment_id INTEGER, "
+                " profit_loss REAL, capital REAL, roi REAL, is_win INTEGER, "
+                " duration_minutes INTEGER, mesa_types TEXT, recorded_at TEXT)",
+                timeout=5
+            )
+            
+            self.tracker.conn.execute(
+                "INSERT INTO learned_investments "
+                "(investment_id, profit_loss, capital, roi, is_win, duration_minutes, mesa_types, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (investment_id, profit_loss, capital, roi, is_win, 
+                 duration_minutes, json.dumps(mesa_types or []), 
+                 datetime.now().isoformat()),
+                timeout=5
+            )
+            self.tracker.conn.commit()
+        except Exception:
+            pass
+    
+    def analyze_investment_performance(self) -> Dict:
+        """
+        Analyze all investments to find winning patterns
+        
+        Returns:
+            Investment performance statistics
+        """
+        try:
+            if not hasattr(self.tracker, 'conn'):
+                return {'status': 'no_connection'}
+            
+            cursor = self.tracker.conn.cursor()
+            
+            # Get all recorded investments
+            cursor.execute(
+                "SELECT investment_id, profit_loss, capital, roi, is_win, duration_minutes "
+                "FROM learned_investments ORDER BY recorded_at DESC"
+            )
+            investments = cursor.fetchall()
+            
+            if not investments:
+                return {'status': 'no_data', 'total_investments': 0}
+            
+            # Analyze patterns
+            wins = sum(1 for inv in investments if inv[4] == 1)
+            total = len(investments)
+            win_rate = (wins / total * 100) if total > 0 else 0
+            
+            # Calculate averages
+            avg_roi = statistics.mean([inv[3] for inv in investments])
+            avg_capital = statistics.mean([inv[2] for inv in investments])
+            total_profit = sum(inv[1] for inv in investments)
+            
+            # Profit by capital size
+            small_capital = [inv for inv in investments if inv[2] < avg_capital/2]
+            large_capital = [inv for inv in investments if inv[2] > avg_capital*2]
+            
+            small_roi = statistics.mean([inv[3] for inv in small_capital]) if small_capital else 0
+            large_roi = statistics.mean([inv[3] for inv in large_capital]) if large_capital else 0
+            
+            return {
+                'status': 'success',
+                'total_investments': total,
+                'wins': wins,
+                'win_rate': win_rate,
+                'total_profit': total_profit,
+                'avg_roi': avg_roi,
+                'avg_capital': avg_capital,
+                'small_capital_roi': small_roi,
+                'large_capital_roi': large_roi,
+                'best_investment': max(investments, key=lambda x: x[1]) if investments else None,
+                'worst_investment': min(investments, key=lambda x: x[1]) if investments else None,
+            }
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    def get_investment_recommendations(self) -> List[str]:
+        """
+        Get investment-level recommendations based on learning
+        
+        Returns:
+            List of recommendations
+        """
+        analysis = self.analyze_investment_performance()
+        recs = []
+        
+        if analysis.get('status') != 'success':
+            return ["Insufficient investment history to analyze"]
+        
+        inv_count = analysis.get('total_investments', 0)
+        if inv_count < 3:
+            return [f"Create more investments to get better recommendations ({inv_count}/3)"]
+        
+        win_rate = analysis.get('win_rate', 0)
+        avg_roi = analysis.get('avg_roi', 0)
+        
+        # Win rate recommendation
+        if win_rate >= 60:
+            recs.append(f"✅ Excellent! {win_rate:.0f}% of your investments are profitable")
+        elif win_rate >= 50:
+            recs.append(f"Good! {win_rate:.0f}% of your investments are profitable")
+        else:
+            recs.append(f"Focus on profitability - only {win_rate:.0f}% of investments profit")
+        
+        # ROI recommendation
+        if avg_roi > 0:
+            recs.append(f"📈 Average ROI: {avg_roi:.1f}% per investment")
+        else:
+            recs.append(f"⚠️  Average ROI is negative ({avg_roi:.1f}%) - review strategy")
+        
+        # Capital size recommendation
+        small_roi = analysis.get('small_capital_roi', 0)
+        large_roi = analysis.get('large_capital_roi', 0)
+        
+        if small_roi > large_roi and large_roi > 0:
+            recs.append("💡 Try smaller investments for better returns")
+        elif large_roi > small_roi and small_roi > 0:
+            recs.append("💡 Consider increasing your investment size")
+        
+        return recs

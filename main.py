@@ -327,6 +327,21 @@ class LinupApp:
         except Exception:
             return None
 
+    def _count_total_investments(self) -> int:
+        """Count total investments created by user."""
+        conn = self._get_conn()
+        if not conn:
+            return 0
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM investments")
+            count = cursor.fetchone()[0] or 0
+            return count
+        except Exception:
+            return 0
+        finally:
+            conn.close()
+
     def _guardar_sesion(self):
         """Save or update session. Returns (True, None) or (False, error_msg)."""
         try:
@@ -2410,6 +2425,18 @@ class LinupApp:
                 err_dlg.actions_alignment = ft.MainAxisAlignment.CENTER
                 self.page.show_dialog(err_dlg)
             else:
+                # Record investment outcome for learning
+                if self.current_investment_id and self.learning_engine and hasattr(self.learning_engine.tracker, 'conn'):
+                    try:
+                        self.learning_engine.record_investment_outcome(
+                            investment_id=self.current_investment_id,
+                            profit_loss=profit,
+                            capital=self.banca_inicial,
+                            mesa_types=[self.nombre_mesa]
+                        )
+                    except Exception:
+                        pass  # Learning failure shouldn't affect session save
+                
                 # Show success
                 suc_dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
                 def close_suc(e):
@@ -3756,18 +3783,17 @@ class LinupApp:
             return "AI: Initializing..."
         
         try:
-            # Get total decisions made from decision tracker stats
-            stats = self.decision_tracker.get_decision_stats()
-            total_decisions = stats.get('total_decisions', 0)
+            # Get total investments created
+            total_investments = self._count_total_investments()
             
-            # Minimum decisions needed for reliable AI recommendations
-            MIN_DECISIONS = 20
+            # Minimum investments needed for reliable AI recommendations
+            MIN_INVESTMENTS = 20
             
-            if total_decisions < MIN_DECISIONS:
+            if total_investments < MIN_INVESTMENTS:
                 # Show training progress
-                progress_pct = int((total_decisions / MIN_DECISIONS) * 100)
-                remaining = max(0, MIN_DECISIONS - total_decisions)
-                return f"AI 🧠 Training: {progress_pct}% ({remaining} more decisions)"
+                progress_pct = int((total_investments / MIN_INVESTMENTS) * 100)
+                remaining = max(0, MIN_INVESTMENTS - total_investments)
+                return f"AI 🧠 Training: {progress_pct}% ({remaining} more investments)"
             
             # Enough data - show recommendations
             profile = self.learning_engine.get_player_profile()
