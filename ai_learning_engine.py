@@ -30,10 +30,10 @@ class LearningEngine:
         Returns:
             Dictionary with pattern analysis
         """
-        decisions = self.tracker.get_decisions_with_feedback()
+        decisions = self.tracker.get_decisions_with_outcomes()
         
         if not decisions:
-            return {'status': 'insufficient_data', 'message': 'No decisions with feedback'}
+            return {'status': 'insufficient_data', 'message': 'No decisions with outcomes'}
         
         # Group by bet target
         target_performance = defaultdict(lambda: {'wins': 0, 'losses': 0, 'profits': 0})
@@ -176,7 +176,7 @@ class LearningEngine:
         Returns:
             List of learned winning patterns
         """
-        decisions = self.tracker.get_decisions_with_feedback()
+        decisions = self.tracker.get_decisions_with_outcomes()
         
         if not decisions:
             return []

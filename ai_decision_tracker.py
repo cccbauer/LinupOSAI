@@ -346,6 +346,33 @@ class DecisionTracker:
             print(f"Error getting decision stats: {e}")
             return {}
     
+    def get_decisions_with_outcomes(self) -> List[Dict]:
+        """Get all decisions that have outcomes (not pending)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT * FROM decisions
+                WHERE outcome IN ('win', 'loss', 'break_even')
+                ORDER BY decision_time DESC
+            ''')
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            decisions = []
+            for row in rows:
+                decision = dict(row)
+                decision['decision_context'] = json.loads(decision['decision_context'])
+                decisions.append(decision)
+            
+            return decisions
+        except Exception as e:
+            print(f"Error retrieving decisions with outcomes: {e}")
+            return []
+    
     def get_decisions_with_feedback(self) -> List[Dict]:
         """Get decisions that have player feedback"""
         try:
