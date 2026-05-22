@@ -3201,6 +3201,8 @@ class LinupApp:
                             outcome=outcome,
                             profit_loss=profit_loss
                         )
+                        # Update training with new decision outcome
+                        self.learning_engine.learn_winning_patterns()
                         self.current_decision_id = None
                     except Exception:
                         pass  # Silently fail if tracking fails
