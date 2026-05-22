@@ -141,8 +141,13 @@ class DecisionTracker:
             
             conn.commit()
             conn.close()
+            
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[RECORD_DECISION] Saved decision {decision.decision_id}: {decision.bet_target}\n")
             return True
         except Exception as e:
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[RECORD_DECISION] ERROR: {e}\n")
             print(f"Error recording decision: {e}")
             return False
     
@@ -161,8 +166,13 @@ class DecisionTracker:
             
             conn.commit()
             conn.close()
+            
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[RECORD_OUTCOME] Updated {decision_id}: outcome={outcome}, result={spin_result}, profit={profit_loss}\n")
             return True
         except Exception as e:
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[RECORD_OUTCOME] ERROR: {e}\n")
             print(f"Error recording outcome: {e}")
             return False
     
@@ -368,8 +378,13 @@ class DecisionTracker:
                 decision['decision_context'] = json.loads(decision['decision_context'])
                 decisions.append(decision)
             
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[GET_DECISIONS] Found {len(decisions)} decisions with outcomes\n")
+            
             return decisions
         except Exception as e:
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(f"[GET_DECISIONS] ERROR: {e}\n")
             print(f"Error retrieving decisions with outcomes: {e}")
             return []
     
