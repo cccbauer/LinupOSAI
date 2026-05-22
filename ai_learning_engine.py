@@ -189,7 +189,12 @@ class LearningEngine:
         """
         decisions = self.tracker.get_decisions_with_outcomes()
         
+        log_msg = f"[LEARN] Retrieved {len(decisions)} decisions with outcomes\n"
+        
         if not decisions:
+            log_msg += "[LEARN] No decisions found\n"
+            with open("/tmp/linup_learning.log", "a") as f:
+                f.write(log_msg)
             return []
         
         # Group decisions by context
@@ -214,8 +219,11 @@ class LearningEngine:
             
             group['decisions'].append(features)
         
+        log_msg += f"[LEARN] Grouped into {len(pattern_groups)} context patterns\n"
+        
         # Extract patterns with sufficient data
         patterns = []
+        saved_count = 0
         for context_hash, group in pattern_groups.items():
             total = group['wins'] + group['losses']
             
@@ -223,6 +231,8 @@ class LearningEngine:
             if total >= 3:
                 win_rate = group['wins'] / total
                 avg_profit = statistics.mean(group['profits']) if group['profits'] else 0
+                
+                log_msg += f"[LEARN] Pattern: wins={group['wins']}, losses={group['losses']}, win_rate={win_rate:.2f}\n"
                 
                 # Only save patterns with >50% win rate
                 if win_rate > 0.5:
@@ -237,6 +247,8 @@ class LearningEngine:
                         group['losses'],
                         avg_profit
                     )
+                    saved_count += 1
+                    log_msg += f"[LEARN] Saved pattern: {pattern_key}\n"
                     
                     patterns.append({
                         'pattern_key': pattern_key,
@@ -246,6 +258,10 @@ class LearningEngine:
                         'average_profit': avg_profit,
                         'confidence': min(1.0, win_rate * (total / 10))
                     })
+        
+        log_msg += f"[LEARN] Total saved patterns: {saved_count}\n"
+        with open("/tmp/linup_learning.log", "a") as f:
+            f.write(log_msg)
         
         # Sort by confidence
         patterns.sort(key=lambda x: x['confidence'], reverse=True)
