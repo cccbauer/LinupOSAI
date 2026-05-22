@@ -140,14 +140,25 @@ class LearningEngine:
         """
         context = decision.get('decision_context', {})
         
+        # Parse hour of day safely
+        try:
+            dt_str = decision.get('decision_time', '')
+            if 'T' in dt_str:
+                hour_part = dt_str.split('T')[1].split(':')[0]
+                hour_of_day = int(hour_part)
+            else:
+                hour_of_day = 12
+        except (IndexError, ValueError):
+            hour_of_day = 12
+        
         features = {
-            'bet_target': decision['bet_target'],
-            'bet_type': decision['bet_type'],
-            'source': decision['source'],
+            'bet_target': decision.get('bet_target', ''),
+            'bet_type': decision.get('bet_type', ''),
+            'source': decision.get('source', ''),
             'confidence': context.get('confidence', 0),
             'reason': context.get('reason', ''),
-            'amount_tier': self._classify_amount(decision['bet_amount']),
-            'hour_of_day': int(decision['decision_time'][:13].split('T')[1]) if 'T' in decision['decision_time'] else 12,
+            'amount_tier': self._classify_amount(decision.get('bet_amount', 0)),
+            'hour_of_day': hour_of_day,
         }
         
         return features

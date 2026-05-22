@@ -3202,10 +3202,13 @@ class LinupApp:
                             profit_loss=profit_loss
                         )
                         # Update training with new decision outcome
-                        self.learning_engine.learn_winning_patterns()
+                        learned_patterns = self.learning_engine.learn_winning_patterns()
                         self.current_decision_id = None
-                    except Exception:
-                        pass  # Silently fail if tracking fails
+                    except Exception as e:
+                        import traceback
+                        with open("/tmp/linup_learning_error.log", "a") as _f:
+                            _f.write(f"[learning_error] {type(e).__name__}: {e}\n")
+                            traceback.print_exc(file=_f)
             else:
                 if self.free_spin_mode:
                     # Red + Black: net 0 unless 0 falls (lose both)
