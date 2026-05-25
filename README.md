@@ -15,7 +15,7 @@ AI-enhanced variant of the Linup roulette betting application with advanced feat
 
 ## Current Version
 
-v17.1.0-AI
+v17.3-AI
 
 ## Technology Stack
 
