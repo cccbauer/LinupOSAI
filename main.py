@@ -123,7 +123,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.1.5-AI"
+        self.page.title      = "Linup v18.1.8-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -324,12 +324,30 @@ class LinupApp:
                     "ALTER TABLE investment_tables ADD COLUMN token_balance REAL DEFAULT 0",
                     "ALTER TABLE investment_tables ADD COLUMN token_price REAL DEFAULT 0",
                     "ALTER TABLE investment_tables ADD COLUMN chips_per_token REAL DEFAULT 0",
+                    # Per-table base chip, remembered from the last setup on that table
+                    "ALTER TABLE table_stats ADD COLUMN base_chip REAL DEFAULT 0",
                 ]:
                     try:
                         conn.execute(_col)
                         conn.commit()
                     except Exception:
                         pass
+                # One-time migration: CHIPS investments now store capital in
+                # CHIPS (= sum of table banks) instead of USD, so max-loss math
+                # stays in a single unit. Guarded by user_version so it runs once.
+                try:
+                    ver = conn.execute("PRAGMA user_version").fetchone()[0]
+                    if ver < 1:
+                        conn.execute(
+                            "UPDATE investments SET capital = COALESCE("
+                            " (SELECT SUM(init_bank) FROM investment_tables "
+                            "  WHERE investment_id = investments.id), capital) "
+                            "WHERE inv_type = 'CHIPS'"
+                        )
+                        conn.execute("PRAGMA user_version = 1")
+                        conn.commit()
+                except Exception:
+                    pass
                 conn.close()
                 self.db_path = db_path
                 break
@@ -448,6 +466,42 @@ class LinupApp:
         finally:
             conn.close()
 
+    def _load_base_chip(self, investment_id, mesa, default=0.1):
+        """Return the base chip last saved for this (investment, table), or default."""
+        conn = self._get_conn()
+        if not conn:
+            return default
+        try:
+            row = conn.execute(
+                "SELECT base_chip FROM table_stats WHERE investment_id=? AND mesa=?",
+                (investment_id or 0, str(mesa))
+            ).fetchone()
+            if row and row[0] and float(row[0]) > 0:
+                return float(row[0])
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return default
+
+    def _save_base_chip(self, investment_id, mesa, base_chip):
+        """Persist the base chip for this (investment, table) so it's remembered."""
+        conn = self._get_conn()
+        if not conn:
+            return
+        try:
+            conn.execute(
+                "INSERT INTO table_stats (investment_id, mesa, base_chip) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(investment_id, mesa) DO UPDATE SET base_chip=?",
+                (investment_id or 0, str(mesa), float(base_chip), float(base_chip))
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
     def _recompute_table_stats(self, investment_id: int):
         """Rebuild table_stats wins/losses/last_bank entirely from compound_sessions."""
         conn = self._get_conn()
@@ -498,6 +552,7 @@ class LinupApp:
         self.last_prog_state      = True   # was progression on when last bet resolved
         self.last_bank_delta      = 0.0
         self.stop_loss_triggered  = False
+        self.goal_achieved_shown  = False
         self.activa               = False
         self.free_spin_mode       = False
         self.live_table_mode      = False
@@ -515,6 +570,7 @@ class LinupApp:
         self.session_id           = None
         self.inv_name             = ""
         self.inv_capital          = 0.0
+        self.chip_usd_rate        = 0.0   # USD per chip (CHIPS investments)
         self.inv_other_pl         = 0.0
         self.inv_type             = 'FIAT'
         # Which column categories are shown in the registration table / mixer
@@ -531,6 +587,9 @@ class LinupApp:
 
     def _fmt_bank(self, val: float) -> str:
         if self.inv_type == 'CHIPS':
+            rate = getattr(self, 'chip_usd_rate', 0.0)
+            if rate > 0:
+                return f"{int(round(val)):,} (${val * rate:,.2f})"
             return f"{int(round(val)):,}"
         return f"${val:.2f}"
 
@@ -542,6 +601,7 @@ class LinupApp:
         ('BTC',  'BTC – Bitcoin',   'bitcoin'),
         ('ETH',  'ETH – Ethereum',  'ethereum'),
         ('SOL',  'SOL – Solana',    'solana'),
+        ('LTC',  'LTC – Litecoin',  'litecoin'),
         ('BNB',  'BNB – BNB Chain', 'binancecoin'),
         ('XRP',  'XRP – XRP',       'ripple'),
         ('ADA',  'ADA – Cardano',   'cardano'),
@@ -549,6 +609,25 @@ class LinupApp:
         ('USDT', 'USDT – Tether',   None),
         ('USDC', 'USDC – USD Coin', None),
     ]
+
+    # Default chip conversion per token: how many tokens the base "Credits"
+    # (10) are worth — i.e. the "= tokens" field default. The casino prices a
+    # chip at ≈ $0.005 (10 credits ≈ $0.05), so each value is 0.05 / reference
+    # price. SOL/BTC/ETH/LTC/USDT are exact casino rates; the rest are derived
+    # on the same $0.005/chip basis and are editable in the setup form.
+    _CHIP_TOKEN_DEFAULTS = {
+        'BTC':  0.000001,
+        'ETH':  0.00002,
+        'SOL':  0.0004,
+        'LTC':  0.001,
+        'BNB':  0.00005,
+        'XRP':  0.02,
+        'ADA':  0.05,
+        'DOGE': 0.25,
+        'USDT': 0.05,
+        'USDC': 0.05,
+    }
+    _DEFAULT_CHIP_TOKENS = 0.0004  # fallback ("= tokens" for 10 credits)
 
     async def _fetch_token_price(self, symbol: str) -> float:
         import urllib.request, json, ssl
@@ -618,7 +697,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v18.1.5-AI", color='#9b59b6', size=18),
+                        ft.Text("v18.1.8-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -871,6 +950,33 @@ class LinupApp:
             _tf_dark = dict(bgcolor='#3a3a3a', color=ft.Colors.WHITE,
                             label_style=ft.TextStyle(color='#aaaaaa'))
 
+            total_lbl = ft.Text("TOTAL CAPITAL:  0 chips  ($0.00)",
+                                color='#f39c12', size=14, weight=ft.FontWeight.BOLD)
+
+            def _chips_totals():
+                """Return (total_chips, total_usd) across all table rows."""
+                total_chips = total_usd = 0.0
+                for (dd, bf, pf, ccf, ctf) in chip_rows_refs:
+                    try:
+                        bal   = float(bf.value  or 0)
+                        price = float(pf.value  or 0)
+                        cc    = float(ccf.value or 10)
+                        ct    = float(ctf.value or self._DEFAULT_CHIP_TOKENS)
+                        cpt   = cc / ct if ct > 0 else 0
+                        total_chips += bal * cpt
+                        total_usd   += bal * price
+                    except Exception:
+                        pass
+                return total_chips, total_usd
+
+            def _refresh_total(_=None):
+                tc, tu = _chips_totals()
+                total_lbl.value = f"TOTAL CAPITAL:  {tc:,.0f} chips  (${tu:,.2f})"
+                try:
+                    total_lbl.update()
+                except Exception:
+                    pass
+
             for i in range(num_tables):
                 token_dd = ft.Dropdown(
                     options=dd_options,
@@ -899,7 +1005,8 @@ class LinupApp:
                     expand=1, **_tf_dark,
                 )
                 ct_f = ft.TextField(
-                    value="0.0004", label="= tokens",
+                    value=str(self._CHIP_TOKEN_DEFAULTS.get('SOL', self._DEFAULT_CHIP_TOKENS)),
+                    label="= tokens",
                     height=45, keyboard_type=ft.KeyboardType.NUMBER,
                     expand=1, **_tf_dark,
                 )
@@ -914,17 +1021,18 @@ class LinupApp:
                             bal   = float(bf.value  or 0)
                             price = float(pf.value  or 0)
                             cc    = float(ccf.value or 10)
-                            ct    = float(ctf.value or 0.0004)
+                            ct    = float(ctf.value or self._DEFAULT_CHIP_TOKENS)
                             cpt   = cc / ct if ct > 0 else 0
                             chips = int(bal * cpt)
                             usd   = bal * price
-                            clbl.value = f"{chips:,} chips  |  ${usd:,.2f}"
+                            clbl.value = f"{chips:,} chips  (${usd:,.2f})"
                         except Exception:
                             clbl.value = "—"
                         try:
                             clbl.update()
                         except Exception:
                             pass
+                        _refresh_total()
                     return update
 
                 upd = _make_updater(bal_f, price_f, cc_f, ct_f, chip_lbl)
@@ -933,9 +1041,13 @@ class LinupApp:
                 cc_f.on_change    = upd
                 ct_f.on_change    = upd
 
-                def _make_fetch_handler(dd, pf, slbl, upd_fn):
+                def _make_fetch_handler(dd, pf, ctf, slbl, upd_fn):
                     async def _do_fetch():
                         sym = dd.value or 'SOL'
+                        # Snap the "= tokens" conversion to this token's default
+                        ctf.value = str(self._CHIP_TOKEN_DEFAULTS.get(
+                            sym, self._DEFAULT_CHIP_TOKENS))
+                        ctf.update()
                         slbl.value = f"Fetching {sym}…"
                         self.page.update()
                         price = await self._fetch_token_price(sym)
@@ -952,7 +1064,7 @@ class LinupApp:
 
                     return trigger
 
-                fetch_handler = _make_fetch_handler(token_dd, price_f, status_lbl, upd)
+                fetch_handler = _make_fetch_handler(token_dd, price_f, ct_f, status_lbl, upd)
                 token_dd.on_change = fetch_handler
 
                 fetch_btn = ft.ElevatedButton(
@@ -980,21 +1092,25 @@ class LinupApp:
 
             def on_create_chips(_):
                 tables_data = []
-                total_usd   = 0.0
+                total_chips = total_usd = 0.0
                 for idx, (dd, bf, pf, ccf, ctf) in enumerate(chip_rows_refs):
                     t_name = dd.value or f"TABLE {idx + 1}"
                     try:
                         bal   = float(bf.value  or 0)
                         price = float(pf.value  or 0)
                         cc    = float(ccf.value or 10)
-                        ct    = float(ctf.value or 0.0004)
+                        ct    = float(ctf.value or self._DEFAULT_CHIP_TOKENS)
                         cpt   = cc / ct if ct > 0 else 0
                         chips = round(bal * cpt, 2)
                     except Exception:
                         bal = price = cpt = chips = 0.0
                     tables_data.append((t_name, chips, t_name, bal, price, cpt))
-                    total_usd += bal * price
-                self._create_investment(inv_name, total_usd, tables_data, 'CHIPS')
+                    total_chips += chips
+                    total_usd   += bal * price
+                # Capital is stored in CHIPS so it matches the per-table banks
+                # (max-loss math stays in one unit); USD stays derivable from
+                # the per-table token data saved alongside.
+                self._create_investment(inv_name, total_chips, tables_data, 'CHIPS')
 
             controls = [
                 ft.ElevatedButton(
@@ -1008,7 +1124,12 @@ class LinupApp:
                         color='#7f8c8d', size=12),
                 ft.Container(height=8),
             ] + rows + [
-                ft.Container(height=20),
+                ft.Container(
+                    bgcolor='#222222', border_radius=8,
+                    padding=12, margin=ft.margin.only(top=4, bottom=4),
+                    content=total_lbl,
+                ),
+                ft.Container(height=8),
                 ft.ElevatedButton(
                     "CREATE INVESTMENT", on_click=on_create_chips,
                     height=60, expand=True,
@@ -1076,6 +1197,7 @@ class LinupApp:
         self.current_investment_id = investment_id
         inv_name    = "Investment"
         inv_capital = 0.0
+        header_cap_txt = "$0.00"
         table_rows  = []
         conn = self._get_conn()
         if conn:
@@ -1153,12 +1275,14 @@ class LinupApp:
                         txt = (f"{mesa_name}  |  {bk_fmt}"
                                f"  |  W:{wins} L:{losses}  |  {eff:.0f}%")
 
-                    def make_loader(m, bk, has_hist, opl, itype=db_inv_type):
+                    def make_loader(m, bk, has_hist, opl, itype=db_inv_type,
+                                    rate=mesa_chip_rate.get(mesa_name, 0.0)):
                         def loader(ev):
                             self.reset_variables()
                             self.current_investment_id = investment_id
                             self.inv_name      = inv_name
                             self.inv_capital   = float(inv_capital)
+                            self.chip_usd_rate = float(rate)  # USD per chip (CHIPS only)
                             self.inv_other_pl  = opl
                             self.inv_type      = itype
                             self.nombre_mesa   = str(m)
@@ -1213,6 +1337,13 @@ class LinupApp:
                 total_usd_pl = sum(
                     (d[4] - d[1]) * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
                 ) if db_inv_type == 'CHIPS' else total_pl
+
+                # Capital shown in CHIPS with USD in parenthesis (FIAT stays $)
+                if db_inv_type == 'CHIPS':
+                    header_cap_txt = (f"{int(round(inv_capital)):,} chips  "
+                                      f"(${total_usd_cap:,.2f})")
+                else:
+                    header_cap_txt = f"${inv_capital:.2f}"
 
                 proj_capital = total_usd_cap if db_inv_type == 'CHIPS' else float(inv_capital)
                 per_session_rate = (
@@ -1305,8 +1436,9 @@ class LinupApp:
                                 mur=dict(mesa_usd_rate), uc=total_usd_cap):
                     self.show_actual_graph_view(iid, n, c, it, mur, uc)
 
-                def _edit_sessions(_, n=inv_name, c=float(inv_capital), iid=investment_id):
-                    self.show_edit_sessions(iid, n, c)
+                def _edit_sessions(_, n=inv_name, c=float(inv_capital),
+                                   iid=investment_id, it=db_inv_type):
+                    self.show_edit_sessions(iid, n, c, it)
 
                 table_rows.append(ft.Container(height=6))
                 table_rows.append(
@@ -1364,7 +1496,7 @@ class LinupApp:
                                                              color=ft.Colors.WHITE),
                                     ),
                                     ft.Text(
-                                        f"{inv_name}  |  ${inv_capital:.2f}",
+                                        f"{inv_name}  |  {header_cap_txt}",
                                         color=ft.Colors.WHITE, size=13,
                                         weight=ft.FontWeight.BOLD, expand=True,
                                         text_align=ft.TextAlign.RIGHT,
@@ -1571,7 +1703,8 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # EDIT ACTUAL SESSIONS
     # ──────────────────────────────────────────────────────────────────
-    def show_edit_sessions(self, investment_id: int, inv_name: str, inv_capital: float):
+    def show_edit_sessions(self, investment_id: int, inv_name: str, inv_capital: float,
+                           inv_type: str = 'FIAT'):
         """Display and edit all compound sessions for an investment."""
         sessions = []
         conn = self._get_conn()
@@ -1820,7 +1953,9 @@ class LinupApp:
                     ft.Container(height=12),
                     ft.Text(f"{inv_name}  —  EDIT SESSIONS",
                         color='#3498db', size=16, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"Total sessions: {len(sessions)}  |  Base capital: ${inv_capital:.2f}",
+                    ft.Text(f"Total sessions: {len(sessions)}  |  Base capital: "
+                            + (f"{int(round(inv_capital)):,} chips" if inv_type == 'CHIPS'
+                               else f"${inv_capital:.2f}"),
                         color='#7f8c8d', size=12),
                     ft.Container(height=10),
                     ft.Divider(color='#333333', height=1),
@@ -2000,7 +2135,7 @@ class LinupApp:
         # Bucket sessions for pie chart (5 buckets)
         bucket_ranges = [(-float('inf'), -5), (-5, 0), (0, 5), (5, 10), (10, float('inf'))]
         bucket_labels = ["< -5%", "-5% to 0%", "0% to 5%", "5% to 10%", "> 10%"]
-        bucket_colors = ['#c0392b', '#e67e22', '#95a5a6', '#3498db', '#2ecc71']
+        bucket_colors = ['#c0392b', '#e67e22', '#2ecc71', '#27ae60', '#1e8449']
         bucket_counts = [0] * 5
         
         for r, _, _, _, _ in session_data:
@@ -2048,7 +2183,7 @@ class LinupApp:
                 (f"Total sesiones", f"{n_sessions}", '#95a5a6'),
                 (f"Ganadoras", f"{n_winning}", '#2ecc71'),
                 (f"Perdedoras", f"{n_losing}", '#e74c3c'),
-                (f"Éxito", f"{success_rate:.1f}%", '#3498db'),
+                (f"Efectividad", f"{success_rate:.1f}%", '#3498db'),
                 (f"Max ganancia", f"+{max_gain:.2f}%", '#2ecc71'),
                 (f"Max pérdida", f"{max_loss:.2f}%", '#e74c3c'),
                 (f"Promedio por sesión", f"{avg_per_session:+.3f}%", '#f39c12'),  # Show 3 decimals for precision
@@ -2103,7 +2238,9 @@ class LinupApp:
                 pts.append((len(pts), bank_end))
 
             yvals  = [p[1] for p in pts]
-            data_range = max(max(yvals) - min(yvals), abs(inv_capital * 0.01), 1.0)
+            # Range floor uses start_capital (same unit as the plotted values:
+            # USD for CHIPS, capital for FIAT) so the y-scale isn't distorted.
+            data_range = max(max(yvals) - min(yvals), abs(start_capital * 0.01), 1.0)
             mid    = (max(yvals) + min(yvals)) / 2
             half   = data_range * 1.5 / 2
             min_y  = mid - half
@@ -2141,17 +2278,38 @@ class LinupApp:
                                              paint=ft.Paint(color='#666666', stroke_width=1)))
                         x += 8
 
-                fill = [cv.Path.MoveTo(x=sx(pts[0][0]), y=sy(pts[0][1]))]
-                for xi, yi in pts[1:]:
-                    fill.append(cv.Path.LineTo(x=sx(xi), y=sy(yi)))
-                fill.append(cv.Path.LineTo(x=sx(pts[-1][0]), y=MT + ph))
+                # Screen-space points + smooth (Catmull-Rom -> cubic Bézier)
+                # curve segments that still pass through every data point.
+                sp = [(sx(xi), sy(yi)) for xi, yi in pts]
+
+                def _smooth_segments():
+                    segs = []
+                    n = len(sp)
+                    for i in range(n - 1):
+                        p0 = sp[i - 1] if i > 0 else sp[i]
+                        p1 = sp[i]
+                        p2 = sp[i + 1]
+                        p3 = sp[i + 2] if i + 2 < n else sp[i + 1]
+                        cp1x = p1[0] + (p2[0] - p0[0]) / 6.0
+                        cp1y = p1[1] + (p2[1] - p0[1]) / 6.0
+                        cp2x = p2[0] - (p3[0] - p1[0]) / 6.0
+                        cp2y = p2[1] - (p3[1] - p1[1]) / 6.0
+                        segs.append(cv.Path.CubicTo(cp1x=cp1x, cp1y=cp1y,
+                                                    cp2x=cp2x, cp2y=cp2y,
+                                                    x=p2[0], y=p2[1]))
+                    return segs
+
+                curve = _smooth_segments()
+
+                fill = [cv.Path.MoveTo(x=sp[0][0], y=sp[0][1])]
+                fill.extend(curve)
+                fill.append(cv.Path.LineTo(x=sp[-1][0], y=MT + ph))
                 fill.append(cv.Path.LineTo(x=sx(0), y=MT + ph))
                 fill.append(cv.Path.Close())
                 shapes.append(cv.Path(elements=fill, paint=ft.Paint(color=line_color + '33', style=ft.PaintingStyle.FILL)))
 
-                line = [cv.Path.MoveTo(x=sx(pts[0][0]), y=sy(pts[0][1]))]
-                for xi, yi in pts[1:]:
-                    line.append(cv.Path.LineTo(x=sx(xi), y=sy(yi)))
+                line = [cv.Path.MoveTo(x=sp[0][0], y=sp[0][1])]
+                line.extend(curve)
                 shapes.append(cv.Path(elements=line, paint=ft.Paint(color=line_color, stroke_width=2, style=ft.PaintingStyle.STROKE)))
 
                 if len(pts) <= 25:
@@ -2260,68 +2418,54 @@ class LinupApp:
                 if total_sessions == 0:
                     return shapes
 
-                bar_height = 12
-                spacing = 4
-                chart_width = cw - 40
-                center_x = 20 + chart_width / 2
-                
-                # Split into negatives (left) and positives (right)
-                neg_indices = [0, 1]      # < -5%, -5% to 0%
-                pos_indices = [2, 3, 4]   # 0% to 5%, 5% to 10%, > 10%
-                
-                y_start = 10
-                
-                # Draw negatives on the left (extending leftward from center)
-                for idx, i in enumerate(neg_indices):
-                    count = bucket_counts[i]
+                # Pie geometry — centered in the 160px-tall canvas
+                center_x = cw / 2
+                center_y = 80
+                radius = 64
+                inner_radius = 30  # donut hole
+
+                start_angle = -math.pi / 2  # start at 12 o'clock
+                for i, count in enumerate(bucket_counts):
                     if count == 0:
                         continue
-                    pct = (count / total_sessions * 100)
-                    bar_width = (chart_width / 2 - 10) * (pct / 100)  # Left half
-                    y = y_start + idx * (bar_height + spacing)
-                    
-                    # Draw from center leftward (bar extends left from center_x)
+                    frac = count / total_sessions
+                    sweep = frac * 2 * math.pi
+                    end_angle = start_angle + sweep
+
+                    # Approximate the wedge with line segments along the arc
+                    steps = max(2, int(sweep / 0.15) + 1)
+                    elements = [cv.Path.MoveTo(x=center_x, y=center_y)]
+                    for s in range(steps + 1):
+                        a = start_angle + sweep * (s / steps)
+                        elements.append(cv.Path.LineTo(
+                            x=center_x + radius * math.cos(a),
+                            y=center_y + radius * math.sin(a),
+                        ))
+                    elements.append(cv.Path.Close())
                     shapes.append(cv.Path(
-                        elements=[
-                            cv.Path.MoveTo(x=center_x - bar_width, y=y),
-                            cv.Path.LineTo(x=center_x, y=y),
-                            cv.Path.LineTo(x=center_x, y=y + bar_height),
-                            cv.Path.LineTo(x=center_x - bar_width, y=y + bar_height),
-                            cv.Path.Close(),
-                        ],
+                        elements=elements,
                         paint=ft.Paint(color=bucket_colors[i], style=ft.PaintingStyle.FILL)
                     ))
-                    
-                    # Label on the left side
-                    shapes.append(_cv_text(center_x - bar_width - 30, y + 2, f"{pct:.0f}%", color='#ffffff', size=8))
-                
-                # Center line
-                shapes.append(cv.Line(x1=center_x, y1=y_start, x2=center_x, y2=y_start + 120,
-                                     paint=ft.Paint(color='#666666', stroke_width=2)))
-                
-                # Draw positives on the right (extending rightward from center)
-                for idx, i in enumerate(pos_indices):
-                    count = bucket_counts[i]
-                    if count == 0:
-                        continue
-                    pct = (count / total_sessions * 100)
-                    bar_width = (chart_width / 2 - 10) * (pct / 100)  # Right half
-                    y = y_start + idx * (bar_height + spacing)
-                    
-                    # Draw from center rightward (bar extends right from center_x)
-                    shapes.append(cv.Path(
-                        elements=[
-                            cv.Path.MoveTo(x=center_x, y=y),
-                            cv.Path.LineTo(x=center_x + bar_width, y=y),
-                            cv.Path.LineTo(x=center_x + bar_width, y=y + bar_height),
-                            cv.Path.LineTo(x=center_x, y=y + bar_height),
-                            cv.Path.Close(),
-                        ],
-                        paint=ft.Paint(color=bucket_colors[i], style=ft.PaintingStyle.FILL)
-                    ))
-                    
-                    # Label on the right side
-                    shapes.append(_cv_text(center_x + bar_width + 6, y + 2, f"{pct:.0f}%", color='#ffffff', size=8))
+
+                    # Percentage label at the slice midpoint (only if big enough)
+                    if frac >= 0.04:
+                        mid = start_angle + sweep / 2
+                        lr = (radius + inner_radius) / 2
+                        shapes.append(_cv_text(
+                            center_x + lr * math.cos(mid) - 8,
+                            center_y + lr * math.sin(mid) - 6,
+                            f"{frac * 100:.0f}%", color='#ffffff', size=9,
+                        ))
+
+                    start_angle = end_angle
+
+                # Donut hole (matches card background) + total count in the middle
+                shapes.append(cv.Circle(x=center_x, y=center_y, radius=inner_radius,
+                                        paint=ft.Paint(color='#0d0d0d', style=ft.PaintingStyle.FILL)))
+                shapes.append(_cv_text(center_x - 8, center_y - 12,
+                                       str(total_sessions), color='#ffffff', size=14))
+                shapes.append(_cv_text(center_x - 14, center_y + 4,
+                                       "ses.", color='#7f8c8d', size=8))
 
                 return shapes
 
@@ -2627,7 +2771,7 @@ class LinupApp:
                     bar_height = 0.25*inch
                     chart_width = 5.2*inch
                     center_x = 0.4*inch + chart_width / 2
-                    bucket_colors_hex = ['#c0392b', '#e67e22', '#95a5a6', '#3498db', '#2ecc71']
+                    bucket_colors_hex = ['#c0392b', '#e67e22', '#2ecc71', '#27ae60', '#1e8449']
                     
                     # Draw negatives (left) and positives (right)
                     for idx, (label, count, color_hex) in enumerate(zip(bucket_labels, bucket_counts, bucket_colors_hex)):
@@ -2780,9 +2924,12 @@ class LinupApp:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, name, capital FROM investments ORDER BY id DESC"
+                    "SELECT id, name, capital, inv_type FROM investments ORDER BY id DESC"
                 )
-                for inv_id, name, capital in cursor.fetchall():
+                for inv_id, name, capital, inv_type in cursor.fetchall():
+                    cap_txt = (f"{int(round(capital)):,} chips"
+                               if (inv_type or 'FIAT') == 'CHIPS'
+                               else f"${capital:.2f}")
                     cursor2 = conn.cursor()
                     cursor2.execute(
                         "SELECT mesa_name FROM investment_tables WHERE investment_id=?",
@@ -2804,10 +2951,10 @@ class LinupApp:
                     color    = '#2ecc71' if (total == 0 or eff >= 50) else '#ff4444'
                     n_tables = len(mesa_names)
                     if total > 0:
-                        txt = (f"{name}  |  ${capital:.2f}"
+                        txt = (f"{name}  |  {cap_txt}"
                                f"  |  {n_tables} tables  |  EFF:{eff:.0f}%")
                     else:
-                        txt = f"{name}  |  ${capital:.2f}  |  {n_tables} tables"
+                        txt = f"{name}  |  {cap_txt}  |  {n_tables} tables"
 
                     def make_loader(iid):
                         def loader(ev):
@@ -2872,17 +3019,18 @@ class LinupApp:
     def show_edit_investment(self, inv_id):
         inv_name    = ""
         inv_capital = 0.0
+        edit_inv_type = 'FIAT'
         tables_data = []  # list of (table_id, mesa_name, init_bank)
         conn = self._get_conn()
         if conn:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT name, capital FROM investments WHERE id=?", (inv_id,)
+                    "SELECT name, capital, inv_type FROM investments WHERE id=?", (inv_id,)
                 )
                 row = cursor.fetchone()
                 if row:
-                    inv_name, inv_capital = row
+                    inv_name, inv_capital, edit_inv_type = row[0], row[1], (row[2] or 'FIAT')
                 cursor.execute(
                     "SELECT id, mesa_name, init_bank FROM investment_tables "
                     "WHERE investment_id=? ORDER BY id",
@@ -2899,7 +3047,8 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=50,
         )
         capital_field = ft.TextField(
-            label="Capital ($)", value=str(inv_capital),
+            label="Capital (chips)" if edit_inv_type == 'CHIPS' else "Capital ($)",
+            value=str(inv_capital),
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=50,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
@@ -3052,8 +3201,23 @@ class LinupApp:
         )
         sug_bank      = self.banca_actual
         sug_max_loss  = getattr(self, 'last_max_loss', 2.0)
-        sug_base_chip = getattr(self, 'last_base_chip', 0.1)  # remembered base chip from last setup
+        # Per-table base chip: remembered from the last setup on THIS table,
+        # falling back to the last-used chip in memory, then 0.1.
+        sug_base_chip = self._load_base_chip(
+            getattr(self, 'current_investment_id', 0), self.nombre_mesa,
+            default=getattr(self, 'last_base_chip', 0.1))
         capital       = getattr(self, 'inv_capital', 0.0)
+        # For CHIPS investments the bank, budget and capital are all in CHIPS,
+        # so the percentages stay in one unit. We show the USD equivalent in
+        # parenthesis using the loaded table's USD-per-chip rate.
+        chips_mode    = (getattr(self, 'inv_type', 'FIAT') == 'CHIPS')
+        usd_per_chip  = getattr(self, 'chip_usd_rate', 0.0)
+
+        def _amt(v):
+            """Budget amount: chips with USD in parens (CHIPS) or plain $ (FIAT)."""
+            if chips_mode:
+                return f"{v:.2f} chips (${v * usd_per_chip:.2f})"
+            return f"${v:.2f}"
 
         def _round_up_chip(val):
             if val <= 0:
@@ -3084,7 +3248,7 @@ class LinupApp:
                 pct_bank = (total / bank * 100) if bank > 0 else 0
                 pct_cap  = (total / capital * 100) if capital > 0 else 0
                 return (f"1x({total_1x:.2f}) + 2x({total_2x:.2f}) + 3x({total_3x:.2f})"
-                        f" = ${total:.2f} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
+                        f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
             except Exception:
                 return ""
 
@@ -3098,7 +3262,7 @@ class LinupApp:
                 pct_bank = (total / bank * 100) if bank > 0 else 0
                 pct_cap  = (total / capital * 100) if capital > 0 else 0
                 return (f"1x({total_1x:.2f}) + 3x({total_3x:.2f}) + 5x({total_5x:.2f})"
-                        f" = ${total:.2f} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
+                        f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
             except Exception:
                 return ""
 
@@ -3115,7 +3279,7 @@ class LinupApp:
             try:
                 loss_amt = bank * max_loss_pct / 100
                 cap_pct  = (loss_amt / capital * 100) if capital > 0 else 0
-                return f"MAX LOSS %:  (= ${loss_amt:.2f} · {cap_pct:.1f}% of capital)"
+                return f"MAX LOSS %:  (= {_amt(loss_amt)} · {cap_pct:.1f}% of capital)"
             except Exception:
                 return "MAX LOSS %:"
 
@@ -3377,7 +3541,8 @@ class LinupApp:
                         self.table_input,
                         ft.Text("CAPITAL:", color=ft.Colors.WHITE),
                         ft.TextField(
-                            value=f"${self.inv_capital:.2f}" if hasattr(self, 'inv_capital') else "$0.00",
+                            value=(f"{capital:,.0f} chips (${capital * usd_per_chip:,.2f})"
+                                   if chips_mode else f"${capital:.2f}"),
                             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
                             read_only=True,
                         ),
@@ -3434,6 +3599,9 @@ class LinupApp:
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else 0.5
             self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 2.0
             self.last_base_chip = float(self.fin_base_input.value) if self.fin_base_input.value else 0.1
+            # Remember this base chip for THIS table specifically
+            self._save_base_chip(getattr(self, 'current_investment_id', 0),
+                                 self.nombre_mesa, self.last_base_chip)
         except Exception:
             pass
         # Read column visibility checkboxes
@@ -3513,6 +3681,77 @@ class LinupApp:
                 expand=True,
                 style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE),
             )
+        ]
+        dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+        self.page.show_dialog(dlg)
+
+    # ─────────────────────────────────────────────────────────────────
+    # GOAL ACHIEVED — profit reached the MAX LOSS target (turned positive)
+    # ─────────────────────────────────────────────────────────────────
+    def _check_goal_achieved(self):
+        if self.goal_achieved_shown or self.stop_loss_triggered:
+            return
+        if self.banca_inicial <= 0:
+            return
+        profit_pct = (self.banca_actual - self.banca_inicial) / self.banca_inicial
+        goal_pct = getattr(self, 'last_max_loss', 2.0) / 100
+        if profit_pct < goal_pct:
+            return
+
+        self.goal_achieved_shown = True
+
+        profit = round(self.banca_actual - self.banca_inicial, 2)
+        pl_pct = profit_pct * 100
+
+        dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+
+        def exit_and_save(ev):
+            dlg.open = False
+            dlg.update()
+            self.finalizar_sesion()
+
+        def keep_playing(ev):
+            dlg.open = False
+            dlg.update()
+
+        dlg.title = ft.Text(
+            "CONGRATULATIONS",
+            color='#2ecc71', size=18, weight=ft.FontWeight.BOLD,
+            text_align=ft.TextAlign.CENTER,
+        )
+        dlg.content = ft.Column(
+            tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Divider(color='#444444'),
+                ft.Text("Goal achieved!", color='#2ecc71',
+                        size=15, weight=ft.FontWeight.BOLD,
+                        text_align=ft.TextAlign.CENTER),
+                ft.Container(height=6),
+                ft.Text(f"Target:  +{goal_pct*100:.1f}%",
+                        color=ft.Colors.WHITE, size=14),
+                ft.Text(f"Current: +{pl_pct:.1f}%",
+                        color='#2ecc71', size=14, weight=ft.FontWeight.BOLD),
+                ft.Container(height=4),
+                ft.Text(f"Profit:  {self._fmt_bank(profit)}",
+                        color='#2ecc71', size=20, weight=ft.FontWeight.BOLD),
+                ft.Container(height=10),
+                ft.Text("It's recommended to exit while ahead.",
+                        color='#f39c12', size=12, italic=True,
+                        text_align=ft.TextAlign.CENTER),
+            ],
+        )
+        dlg.actions = [
+            ft.ElevatedButton(
+                content=ft.Text("EXIT & SAVE", size=14, weight=ft.FontWeight.BOLD),
+                on_click=exit_and_save, expand=1,
+                style=ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.WHITE),
+            ),
+            ft.ElevatedButton(
+                content=ft.Text("CONTINUE", size=14, weight=ft.FontWeight.BOLD),
+                on_click=keep_playing, expand=1,
+                style=ft.ButtonStyle(bgcolor='#f39c12', color=ft.Colors.WHITE),
+            ),
         ]
         dlg.actions_alignment = ft.MainAxisAlignment.CENTER
         self.page.show_dialog(dlg)
@@ -4351,8 +4590,10 @@ class LinupApp:
                         self.current_decision_id = None
             else:
                 if self.free_spin_mode:
-                    # Red + Black: net 0 unless 0 falls (lose both)
-                    delta = -2 * self.val_fin if num == 0 else 0.0
+                    # Red + Black uses the BASE chip (not CHIP IN): net 0 unless
+                    # 0 falls, in which case both chips are lost.
+                    base_chip = getattr(self, 'last_base_chip', self.val_fin)
+                    delta = -2 * base_chip if num == 0 else 0.0
                 else:
                     delta = self.val_fin * (1 if num in ROJOS else -1)
                 self.banca_actual      += delta
@@ -4432,12 +4673,29 @@ class LinupApp:
         # Live-grade the new selection in the AI coach bar.
         self._refresh_ai_label()
 
+    def _live_norm(self, g):
+        """In live table mode, map a bare dozen/column to its live (wheel-spread)
+        variant so coverage always uses the live set — e.g. '3a' -> '3a_L', which
+        includes 0. No-op outside live mode or for already-suffixed groups."""
+        if not getattr(self, 'live_table_mode', False):
+            return g
+        name = self._to_display_name(g)
+        if g != name:          # already a live/filtered variant — leave as-is
+            return g
+        f = getattr(self, 'live_filter', None)
+        if name in ('1a', '2a', '3a'):
+            return f'{name}{_DOC_SFX.get(f, "_L")}'
+        if name in ('34', '35', '36') and f:
+            return f'{name}{_COL_SFX.get(f, "")}'
+        return g
+
     def _compute_safety_levels(self):
         """Compute safety level for each number (count of groups that contain it).
         Returns dict {num: count} where count is 0-5."""
         levels = {}
         # Use ALL active groups, not just straight ones
-        active_groups = [g for g in self.grupos_activos
+        active_groups = [self._live_norm(g) for g in self.grupos_activos]
+        active_groups = [g for g in active_groups
                         if g in GRUPOS_MAESTROS]  # make sure group exists
         for num in range(0, 37):
             count = sum(1 for g in active_groups if num in GRUPOS_MAESTROS[g])
@@ -4453,7 +4711,8 @@ class LinupApp:
         - Z0 + ZG + 1a + Even: (Z0 ∪ ZG) ∩ (1a) ∩ (Even)
         - 1a + 2a + R: (1a ∪ 2a) ∩ R
         """
-        active_groups = [g for g in self.grupos_activos
+        active_groups = [self._live_norm(g) for g in self.grupos_activos]
+        active_groups = [g for g in active_groups
                         if g in GRUPOS_MAESTROS]
         if not active_groups:
             return set()
@@ -4502,7 +4761,19 @@ class LinupApp:
                 result = union_set.copy()
             else:
                 result &= union_set
-        
+
+        # 0 has no colour/parity/range, so those filters must not drop it when it
+        # belongs to a base selection (e.g. 3a's wheel-spread, or the Z0 sector).
+        # Mirrors the group design where every 3a_L* variant re-adds 0.
+        base_types   = {'DOZEN', 'COLUMN', 'SECTOR', 'WHEEL', 'WAVE'}
+        only_filters = {'COLOR', 'PARITY', 'RANGE'}
+        present_base   = [u for t, u in type_unions.items() if t in base_types]
+        present_filter = [t for t in type_unions if t in only_filters]
+        if (result is not None and 0 not in result
+                and present_base and present_filter
+                and all(0 in u for u in present_base)):
+            result.add(0)
+
         return result if result is not None else set()
 
     def seleccionar_mixer(self, e):
@@ -4916,6 +5187,7 @@ class LinupApp:
         else:
             all_nums: set = set()
             for g in self.grupos_activos:
+                g = self._live_norm(g)
                 if g in GRUPOS_MAESTROS:
                     all_nums |= GRUPOS_MAESTROS[g]
             safety_levels = self._compute_safety_levels()
@@ -5403,20 +5675,23 @@ class LinupApp:
         return types_used <= 1
 
     def _proceed_bet(self):
-        self._check_pre_bet_warning(self._activate_bet)
+        # Warning first, then the chip/table setup popup, then activate the bet.
+        self._check_pre_bet_warning(
+            lambda: self._show_roulette_chip_popup(self._activate_bet)
+        )
 
     def confirmar_manual(self, e=None):
         if not self.grupos_activos:
             return
-        # Show comprehensive popup for ALL bet types
-        self._show_roulette_chip_popup(self._proceed_bet)
+        # Warning popup before the chip/table setup popup
+        self._proceed_bet()
 
     def auto_invertir_sug(self, grupos):
         self.limpiar_seleccion_visual()
         self.grupos_activos = list(grupos)
         self._refresh_mixer_colors()
-        # Show comprehensive popup for suggested bets too
-        self._show_roulette_chip_popup(self._proceed_bet)
+        # Warning popup before the chip/table setup popup
+        self._proceed_bet()
 
     # ──────────────────────────────────────────────────────────────────
     # AI COMBINATION COACH
@@ -5678,6 +5953,7 @@ class LinupApp:
             self.lbl_inv_pl.color = '#2ecc71' if total_pl >= 0 else '#ff4444'
         self.page.update()
         self._check_stop_loss()
+        self._check_goal_achieved()
 
     def corregir_ultimo(self, e=None):
         # First press while bet is active: cancel the pending bet, restore display

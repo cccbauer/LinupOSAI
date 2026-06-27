@@ -35,7 +35,7 @@ echo ""
 echo "[3/5] Instalando dependencias..."
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
-pip install "flet>=0.25.0"
+pip install "flet==0.80.5" "reportlab>=4.0.0"
 echo "✓ Flet instalado"
 echo ""
 
