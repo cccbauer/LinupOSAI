@@ -1,4 +1,4 @@
-# Croupier draw log — data for evaluating the B/R rhythm model.
+# Croupier draw log — data for evaluating the B/R rhthm model.
 #
 # FORMAT
 #   - Lines starting with '#' are comments (ignored).
@@ -20,5 +20,13 @@
 20 28 13 1 18 4 25 1 14 25 22 31 2 16 24 2 18 11 22 10 4 30 28 20 4 3 28
 21 17 20 9 24 31 29 11 19 14 0 2 23 33 4 33 1 26 2 12 25 23 21 34 19 36
 
-# @ dealer-02
-# (paste the next croupier's numbers here, then add more @ blocks below)
+@ dealer-02
+3 10 3 9 31 32 28 27 28 27 4 35 28 9 0 35 33 4 9 33 10 16 26 12 9 12 30 3 32 35 5 33 3 36 15 24 4 25
+@ dealer-03
+35 8 2 26 7 21 34 31 36 14 5 5 5 7 18 7 29 14 0 7 6 12 3 32 16 25 27 35 29 17 8 22 15 7 1 13 3 10 29 31 32 8 
+
+@ dealer-04
+32 9 23 5 5 9 2 16 1 27 8 8 5 8 20 26 10 28 32 6 24 1 21 13 7 28 31 26 28 2 11 9 32 4 30 30 10 15 1 4 20 18 0 32 19
+
+@ dealer-05
+19 6 24 12 21 8 14 24 1 31 36 23 8 9 1 2 20 19 16 34 10 1 22 34 26 30 3 13 12 25 19 21 7 32 16 32 4 6 13 27 34

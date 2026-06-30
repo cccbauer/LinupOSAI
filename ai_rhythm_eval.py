@@ -33,6 +33,7 @@ import re
 import math
 
 from ai_rhythm import RhythmModel, RHYTHM_WARMUP, RHYTHM_CONF_MARGIN
+from ai_pattern import PatternDetector, PATTERN_WARMUP
 
 # Standard European red numbers — matches ROJOS in main.py.
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -142,6 +143,79 @@ def eval_dealer(nums):
     return out
 
 
+# ── data-integrity checks ────────────────────────────────────────────────────
+def scan_invalid(path):
+    """Return {label: [out-of-range tokens]} — numbers that aren't 0-36."""
+    bad, label = {}, None
+    for raw in open(path, encoding="utf-8"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("@") or (line.startswith("[") and line.endswith("]")):
+            label = line.lstrip("@[").rstrip("]").strip() or label
+        else:
+            for x in re.findall(r"-?\d+", line):
+                if not (0 <= int(x) <= 36):
+                    bad.setdefault(label or "?", []).append(int(x))
+    return bad
+
+
+def _lcs_len(a, b):
+    """Length of the longest identical contiguous run shared by two lists."""
+    best, dp = 0, [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        ndp = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                ndp[j] = dp[j - 1] + 1
+                best = max(best, ndp[j])
+        dp = ndp
+    return best
+
+
+def check_duplicates(dealers, dup=10, soft=6):
+    """Return [(labelA, labelB, run_len, is_duplicate)] for overlapping pairs."""
+    out = []
+    for i in range(len(dealers)):
+        for j in range(i + 1, len(dealers)):
+            n = _lcs_len(dealers[i][1], dealers[j][1])
+            if n >= soft:
+                out.append((dealers[i][0], dealers[j][0], n, n >= dup))
+    return out
+
+
+def report_integrity(path, dealers):
+    """Print warnings for invalid numbers and duplicate/overlapping dealers."""
+    inv = scan_invalid(path)
+    dups = check_duplicates(dealers)
+    if not inv and not dups:
+        return
+    print("INTEGRITY WARNINGS")
+    for label, toks in inv.items():
+        print(f"  ! {label}: out-of-range tokens dropped: {toks}")
+    for a, b, n, is_dup in dups:
+        tag = "DUPLICATE" if is_dup else "overlap?"
+        print(f"  ! {a} & {b} share a {n}-number run ({tag}) — likely same source")
+    print("-" * 78)
+
+
+# ── pattern-mode evaluation (observe 20 → commit → score the rest) ───────────
+def eval_pattern(nums):
+    """Lock a pattern on the first PATTERN_WARMUP colours, then score its
+    predictions on every later colour (predict-before-observe, no leakage)."""
+    pd = PatternDetector(ROJOS)
+    fires = hits = 0
+    for n in nums:
+        b = pd.num_to_bit(n)
+        if b is not None and pd.locked:
+            pc = pd.predict_color()
+            if pc is not None:
+                fires += 1
+                hits += int((1 if pc == "R" else 0) == b)
+        pd.observe_num(n)
+    return {"kind": pd.kind, "fires": fires, "hits": hits}
+
+
 # ── report ───────────────────────────────────────────────────────────────────
 def pct(x):
     return "  --" if x is None else f"{100*x:4.0f}%"
@@ -159,6 +233,7 @@ def main():
         return
 
     print(f"\nRhythm eval — {len(dealers)} croupier(s) from {os.path.basename(path)}")
+    report_integrity(path, dealers)
     print(f"live gates: warmup={RHYTHM_WARMUP}  margin={RHYTHM_CONF_MARGIN} "
           f"(fire when p_red>={0.5+RHYTHM_CONF_MARGIN:.2f} or <={0.5-RHYTHM_CONF_MARGIN:.2f})")
     print("=" * 78)
@@ -232,6 +307,41 @@ def main():
     if need_more:
         print(f"  • Only {tot_fires} confident fires pooled — aim for ~100+ "
               f"(≈15-30 dealers) before trusting the actionable number.")
+
+    # ── PATTERN MODE (observe 20 → commit → bet the rest) ────────────────────
+    print()
+    print("=" * 78)
+    print(f"PATTERN MODE  (lock a pattern on the first {PATTERN_WARMUP} colours, then bet it)")
+    print("-" * 78)
+    print(f"{'dealer':<16} {'pattern':<12} {'bets(rest)':>10} {'hits':>6} {'acc':>6}")
+    pf = ph = 0
+    engaged = 0
+    for label, nums in dealers:
+        r = eval_pattern(nums)
+        kind = r["kind"] or "(warmup)"
+        if r["kind"] and r["kind"] != "none" and r["fires"]:
+            engaged += 1
+            pf += r["fires"]; ph += r["hits"]
+            acc = f"{100*r['hits']/r['fires']:.0f}%"
+        else:
+            acc = "  --"
+        print(f"{label:<16} {kind:<12} {r['fires']:>10} {r['hits']:>6} {acc:>6}")
+    print("-" * 78)
+    if pf:
+        hr = ph / pf
+        p2 = binom_two_sided(ph, pf, 0.5)
+        pbe = binom_ge(ph, pf, BREAK_EVEN)
+        print(f"POOLED (engaged {engaged}/{len(dealers)} dealers): {100*hr:.1f}%  ({ph}/{pf})"
+              f"  p(vs50%)={p2:.3f}  p(<=breakeven {100*BREAK_EVEN:.1f}%)={pbe:.3f}")
+        if p2 < 0.05 and hr > BREAK_EVEN:
+            print("  • Committed patterns beat chance AND clear break-even — real edge so far.")
+        elif hr > BREAK_EVEN:
+            print(f"  • Leans positive ({100*hr:.0f}%) but not yet significant — keep collecting "
+                  f"(have {pf} bets, want ~100+).")
+        else:
+            print("  • Patterns are not beating break-even on this data.")
+    else:
+        print("POOLED: no dealer locked a tradeable pattern in its first 20 draws.")
     print()
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from ai_game_state import GameStateExtractor
 from ai_strategy_model import StrategyModel, MIN_TRAINED_OBS
 from ai_rhythm import RhythmModel, RHYTHM_WARMUP
+from ai_pattern import PatternDetector, PATTERN_WARMUP
 try:
     from ai_decision_tracker import DecisionTracker, Decision
     _HAS_DECISION_TRACKER = True
@@ -203,11 +204,13 @@ class LinupApp:
         self.current_decision_id = None
         self.spins_since_entry = 0      # adaptive line-up wait counter
         self.rhythm_model = None        # live B/R rhythm predictor (per croupier)
+        self.pattern_model = None       # observe-20-then-commit colour pattern
         try:
             self.state_extractor = GameStateExtractor(GRUPOS_MAESTROS,
                                                       WHEEL_NEIGHBORS)
             self.strategy_model = StrategyModel(self.db_path, self.state_extractor)
             self.rhythm_model = RhythmModel(ROJOS)
+            self.pattern_model = PatternDetector(ROJOS)
             if _HAS_DECISION_TRACKER:
                 try:
                     self.decision_tracker = DecisionTracker(db_path=self.db_path)
@@ -585,9 +588,11 @@ class LinupApp:
         self.grupos_activos       = []
         self.history_nums         = []
         self.sliding_window       = deque(maxlen=6)
-        # New session/croupier → forget the previous rhythm tree.
+        # New session/croupier → forget the previous reads.
         if getattr(self, 'rhythm_model', None):
             self.rhythm_model.reset()
+        if getattr(self, 'pattern_model', None):
+            self.pattern_model.reset()
         self.val_fin              = 0.10
         self.val_fout             = 0.30
         self.nombre_mesa          = "TABLE 1"
@@ -4637,10 +4642,15 @@ class LinupApp:
             self.sliding_window.append(num)
             if getattr(self, 'ai_ok', False):
                 self.spins_since_entry += 1   # one more spin in the line-up
-                # Feed the live B/R rhythm predictor (green/0 is skipped inside).
+                # Feed the live B/R predictors (green/0 is skipped inside each).
                 if getattr(self, 'rhythm_model', None):
                     try:
                         self.rhythm_model.observe_num(num)
+                    except Exception:
+                        pass
+                if getattr(self, 'pattern_model', None):
+                    try:
+                        self.pattern_model.observe_num(num)
                     except Exception:
                         pass
             self.update_registration_table()   # buffers row/header updates
@@ -5730,6 +5740,12 @@ class LinupApp:
         """One-line coach text: learning progress, live bet grade, or a tip."""
         if not getattr(self, 'ai_ok', False):
             return "AI: off"
+        # In live table mode the colour-pattern read is the headline.
+        if getattr(self, 'live_table_mode', False) and getattr(self, 'pattern_model', None):
+            try:
+                return "AI 🧠 " + self.pattern_model.status_text()
+            except Exception:
+                pass
         try:
             obs = self.strategy_model.total_observations()
             if obs < MIN_TRAINED_OBS:
@@ -5873,13 +5889,13 @@ class LinupApp:
                     click = None
                 else:
                     top = stats[0]['g']
-                    # AI rhythm: when no manual filter is set, colour the dozen
-                    # with the croupier's predicted B/R rhythm (e.g. 2a -> 2a+R).
+                    # AI pattern: when no manual filter is set, colour the dozen
+                    # with the croupier's committed colour pattern (e.g. 2a -> 2a+R).
                     rcol = None
                     if lf is None and getattr(self, 'ai_ok', False) \
-                            and getattr(self, 'rhythm_model', None):
+                            and getattr(self, 'pattern_model', None):
                         try:
-                            rcol = self.rhythm_model.confident_color()
+                            rcol = self.pattern_model.predict_color()
                         except Exception:
                             rcol = None
                     eff_filter = lf if lf is not None else rcol
@@ -6019,12 +6035,18 @@ class LinupApp:
             self.history_nums.pop()
             if self.sliding_window:
                 self.sliding_window.pop()
-            # Rhythm model is incremental — rebuild it from the corrected history.
-            if getattr(self, 'ai_ok', False) and getattr(self, 'rhythm_model', None):
-                try:
-                    self.rhythm_model.observe_sequence(self.history_nums)
-                except Exception:
-                    pass
+            # Predictors are incremental — rebuild them from the corrected history.
+            if getattr(self, 'ai_ok', False):
+                if getattr(self, 'rhythm_model', None):
+                    try:
+                        self.rhythm_model.observe_sequence(self.history_nums)
+                    except Exception:
+                        pass
+                if getattr(self, 'pattern_model', None):
+                    try:
+                        self.pattern_model.observe_sequence(self.history_nums)
+                    except Exception:
+                        pass
             # Reverse bank
             self.banca_actual -= self.last_bank_delta
             self.last_bank_delta = 0.0
