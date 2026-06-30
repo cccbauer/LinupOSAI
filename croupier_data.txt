@@ -1,0 +1,24 @@
+# Croupier draw log — data for evaluating the B/R rhythm model.
+#
+# FORMAT
+#   - Lines starting with '#' are comments (ignored).
+#   - Start each croupier with a header line:   @ <label>
+#       label can be anything useful: casino / table / dealer id / date.
+#   - Then paste that croupier's drawn numbers IN ORDER (0-36).
+#       Separators don't matter — spaces, commas, or line breaks all work,
+#       and a dealer's numbers may span several lines.
+#   - Numbers continue until the next '@' header (or end of file).
+#
+# RUN
+#   python3 ai_rhythm_eval.py
+#   python3 ai_rhythm_eval.py some_other_file.txt     # optional path
+#
+# Keep each croupier SEPARATE — each dealer's rhythm is their own. Aim for
+# ~30+ draws per dealer; collect ~15 dealers for a first go/no-go read.
+
+@ dealer-01
+20 28 13 1 18 4 25 1 14 25 22 31 2 16 24 2 18 11 22 10 4 30 28 20 4 3 28
+21 17 20 9 24 31 29 11 19 14 0 2 23 33 4 33 1 26 2 12 25 23 21 34 19 36
+
+# @ dealer-02
+# (paste the next croupier's numbers here, then add more @ blocks below)

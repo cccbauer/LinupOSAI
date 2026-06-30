@@ -14,6 +14,7 @@ from pathlib import Path
 # --- AI: combination-choice learning system ---
 from ai_game_state import GameStateExtractor
 from ai_strategy_model import StrategyModel, MIN_TRAINED_OBS
+from ai_rhythm import RhythmModel, RHYTHM_WARMUP
 try:
     from ai_decision_tracker import DecisionTracker, Decision
     _HAS_DECISION_TRACKER = True
@@ -201,10 +202,12 @@ class LinupApp:
         self.current_choice = None      # snapshot held between bet and result
         self.current_decision_id = None
         self.spins_since_entry = 0      # adaptive line-up wait counter
+        self.rhythm_model = None        # live B/R rhythm predictor (per croupier)
         try:
             self.state_extractor = GameStateExtractor(GRUPOS_MAESTROS,
                                                       WHEEL_NEIGHBORS)
             self.strategy_model = StrategyModel(self.db_path, self.state_extractor)
+            self.rhythm_model = RhythmModel(ROJOS)
             if _HAS_DECISION_TRACKER:
                 try:
                     self.decision_tracker = DecisionTracker(db_path=self.db_path)
@@ -582,6 +585,9 @@ class LinupApp:
         self.grupos_activos       = []
         self.history_nums         = []
         self.sliding_window       = deque(maxlen=6)
+        # New session/croupier → forget the previous rhythm tree.
+        if getattr(self, 'rhythm_model', None):
+            self.rhythm_model.reset()
         self.val_fin              = 0.10
         self.val_fout             = 0.30
         self.nombre_mesa          = "TABLE 1"
@@ -4631,6 +4637,12 @@ class LinupApp:
             self.sliding_window.append(num)
             if getattr(self, 'ai_ok', False):
                 self.spins_since_entry += 1   # one more spin in the line-up
+                # Feed the live B/R rhythm predictor (green/0 is skipped inside).
+                if getattr(self, 'rhythm_model', None):
+                    try:
+                        self.rhythm_model.observe_num(num)
+                    except Exception:
+                        pass
             self.update_registration_table()   # buffers row/header updates
             self.actualizar_sugerencias()       # buffers sug_row update
             self.update_ui()                    # single page.update() flushes all
@@ -5860,9 +5872,19 @@ class LinupApp:
                     bg    = '#34495e'
                     click = None
                 else:
-                    top      = stats[0]['g']
-                    actual_g = f'{top}{_DOC_SFX.get(lf, "_L")}'
-                    ftag     = _FILTER_LABELS[lf] if lf else ''
+                    top = stats[0]['g']
+                    # AI rhythm: when no manual filter is set, colour the dozen
+                    # with the croupier's predicted B/R rhythm (e.g. 2a -> 2a+R).
+                    rcol = None
+                    if lf is None and getattr(self, 'ai_ok', False) \
+                            and getattr(self, 'rhythm_model', None):
+                        try:
+                            rcol = self.rhythm_model.confident_color()
+                        except Exception:
+                            rcol = None
+                    eff_filter = lf if lf is not None else rcol
+                    actual_g = f'{top}{_DOC_SFX.get(eff_filter, "_L")}'
+                    ftag     = _FILTER_LABELS[eff_filter] if eff_filter else ''
                     label    = f'{top}+{ftag}' if ftag else top
                     bg       = color if stats[0]['p'] > 0 else '#34495e'
                     click    = self._make_sug_handler([actual_g])
@@ -5997,6 +6019,12 @@ class LinupApp:
             self.history_nums.pop()
             if self.sliding_window:
                 self.sliding_window.pop()
+            # Rhythm model is incremental — rebuild it from the corrected history.
+            if getattr(self, 'ai_ok', False) and getattr(self, 'rhythm_model', None):
+                try:
+                    self.rhythm_model.observe_sequence(self.history_nums)
+                except Exception:
+                    pass
             # Reverse bank
             self.banca_actual -= self.last_bank_delta
             self.last_bank_delta = 0.0
