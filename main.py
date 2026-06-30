@@ -106,6 +106,24 @@ for _c in ('34', '35', '36'):
         if _sfx:   # empty suffix = standard column (stays as outside)
             GRUPOS_LIVE_INSIDE.add(f'{_c}{_sfx}')
 
+# ── Wheel-sector affinity for the live dozen suggestion ──────────────
+# The sectors Z0/ZG/ZP/H partition all 37 numbers, so every spin sits in
+# exactly one sector. Each live dozen zone (Na_L) overlaps the sectors by
+# different amounts, so a "hot" sector favours the dozen whose wheel-zone
+# best covers it (e.g. Z0→3a, ZG→1a, H→2a/3a). Precompute:
+#   SECTOR_OF[n]                 -> the sector containing number n
+#   DOZEN_SECTOR_AFFINITY[d][s]  -> fraction of sector s covered by d_L
+_SECTORS = ('Z0', 'ZG', 'ZP', 'H')
+SECTOR_OF = {}
+for _s in _SECTORS:
+    for _n in GRUPOS_MAESTROS[_s]:
+        SECTOR_OF[_n] = _s
+DOZEN_SECTOR_AFFINITY = {
+    _d: {_s: len(GRUPOS_MAESTROS[f'{_d}_L'] & GRUPOS_MAESTROS[_s]) / len(GRUPOS_MAESTROS[_s])
+         for _s in _SECTORS}
+    for _d in ('1a', '2a', '3a')
+}
+
 
 class LinupApp:
     def __init__(self, page: ft.Page):
@@ -123,7 +141,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.1.8-AI"
+        self.page.title      = "Linup v18.2.0-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -697,7 +715,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v18.1.8-AI", color='#9b59b6', size=18),
+                        ft.Text("v18.2.0-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -3228,7 +3246,7 @@ class LinupApp:
 
         # Initial chip denominations: budget-derived, floored to base_chip
         _sug_budget     = sug_bank * sug_max_loss / 100
-        _sug_chip_denom = max(_round_up_chip(_sug_budget / 90), sug_base_chip)
+        _sug_chip_denom = max(_round_up_chip(_sug_budget / 108), sug_base_chip)
         sug_fout        = max(_round_up_chip(_sug_budget / 18), sug_base_chip)
 
         def _f(val):
@@ -3241,9 +3259,9 @@ class LinupApp:
             """CHIP IN label: progression breakdown then percentages."""
             try:
                 b = _f(base_chip)
-                total_1x = b * 15 * 1
-                total_2x = b * 15 * 2
-                total_3x = b * 15 * 3
+                total_1x = b * 18 * 1
+                total_2x = b * 18 * 2
+                total_3x = b * 18 * 3
                 total    = total_1x + total_2x + total_3x
                 pct_bank = (total / bank * 100) if bank > 0 else 0
                 pct_cap  = (total / capital * 100) if capital > 0 else 0
@@ -3327,7 +3345,7 @@ class LinupApp:
                 ml   = _f(self.max_loss_input.value)
                 budget = bk * max(ml, 0) / 100
                 if bk > 0 and budget > 0:
-                    cin  = _snap_to_base(budget / 90, base)   # CHIP IN: 90 chips
+                    cin  = _snap_to_base(budget / 108, base)  # CHIP IN: 108 chips
                     cout = _snap_to_base(budget / 18, base)   # CHIP OUT: 18 chips
                 else:
                     cin = cout = max(base, 0.0)
@@ -3344,12 +3362,12 @@ class LinupApp:
         def _sync_from_chip(chip_val, chips_per_total):
             """A chip was edited → back-solve the shared budget, push the implied
             MAX LOSS %, and return the re-derived chips. chips_per_total is
-            90 (CHIP IN) or 18 (CHIP OUT)."""
+            108 (CHIP IN) or 18 (CHIP OUT)."""
             bk   = _f(self.banca_input.value)
             base = _f(self.fin_base_input.value)
             budget = max(chip_val, 0.0) * chips_per_total
             ml   = (budget / bk * 100) if bk > 0 else 0.0
-            cin  = _snap_to_base(budget / 90, base) if budget > 0 else max(base, 0.0)
+            cin  = _snap_to_base(budget / 108, base) if budget > 0 else max(base, 0.0)
             cout = _snap_to_base(budget / 18, base) if budget > 0 else max(base, 0.0)
             self.max_loss_input.value = _fmt_pct(ml)
             self.max_loss_input.update()
@@ -3361,7 +3379,7 @@ class LinupApp:
                 return
             _busy[0] = True
             try:
-                bk, _cin, cout = _sync_from_chip(_f(self.fin_input.value), 90)
+                bk, _cin, cout = _sync_from_chip(_f(self.fin_input.value), 108)
                 self.fout_input.value = _fmt(cout)
                 self.fout_input.update()
                 _refresh_labels(bk, _f(self.fin_input.value), cout)
@@ -3552,7 +3570,7 @@ class LinupApp:
                         self.fin_base_input,
                         self.max_loss_label,
                         self.max_loss_input,
-                        ft.Text("CHIP IN — investment of 15 chips (1x · 2x · 3x)", color='#27ae60', size=12,
+                        ft.Text("CHIP IN — investment of 18 chips (1x · 2x · 3x)", color='#27ae60', size=12,
                                 weight=ft.FontWeight.BOLD),
                         self.fin_label,
                         self.fin_input,
@@ -5818,23 +5836,36 @@ class LinupApp:
         new_btns = []
         PAIR_BLOQUEADO = {'ZG', 'ZP'}
         for key, grupos, color in cats:
-            # In live mode, dozens frequency is measured against expanded live sets
+            # Live dozens: score by wheel-SECTOR affinity (which dozen's zone best
+            # covers the sectors the last 6 spins came from) instead of raw zone
+            # membership. Other categories: plain frequency over the last 6 spins.
+            def _score(g):
+                if live and key == 'docs':
+                    return sum(DOZEN_SECTOR_AFFINITY[g].get(SECTOR_OF.get(n), 0.0)
+                               for n in self.sliding_window) / 6
+                return sum(1 for n in self.sliding_window
+                           if n in GRUPOS_MAESTROS[g]) / 6
             stats = sorted(
-                [{'g': g,
-                  'p': sum(1 for n in self.sliding_window
-                           if n in GRUPOS_MAESTROS[f'{g}_L' if (live and key == 'docs') else g]) / 6}
-                 for g in grupos],
+                [{'g': g, 'p': _score(g)} for g in grupos],
                 key=lambda x: x['p'], reverse=True,
             )
 
             if live and key == 'docs':
-                # Single most-frequent dozen using live (wheel-expanded) group + active filter
-                top      = stats[0]['g']
-                actual_g = f'{top}{_DOC_SFX.get(lf, "_L")}'
-                ftag     = _FILTER_LABELS[lf] if lf else ''
-                label    = f'{top}+{ftag}' if ftag else top
-                bg       = color if stats[0]['p'] > 0 else '#34495e'
-                click    = self._make_sug_handler([actual_g])
+                # Top dozen by sector affinity. If the top two are tied, don't
+                # guess — show WAIT and let the next spin break the tie naturally.
+                tie = (len(stats) > 1 and stats[0]['p'] > 0
+                       and abs(stats[0]['p'] - stats[1]['p']) < 1e-9)
+                if tie:
+                    label = "WAIT"
+                    bg    = '#34495e'
+                    click = None
+                else:
+                    top      = stats[0]['g']
+                    actual_g = f'{top}{_DOC_SFX.get(lf, "_L")}'
+                    ftag     = _FILTER_LABELS[lf] if lf else ''
+                    label    = f'{top}+{ftag}' if ftag else top
+                    bg       = color if stats[0]['p'] > 0 else '#34495e'
+                    click    = self._make_sug_handler([actual_g])
                 new_btns.append(
                     ft.ElevatedButton(
                         content=_sug_content(label),
