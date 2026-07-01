@@ -3788,6 +3788,28 @@ class LinupApp:
     # ─────────────────────────────────────────────────────────────────
     # FINALIZE SESSION
     # ─────────────────────────────────────────────────────────────────
+    def _log_draw_sequence(self) -> bool:
+        """Append this session's raw draw sequence to croupier_log.txt (next to
+        the DB), in the '@ dealer' format used by croupier_data.txt, so every
+        session we play is captured for the rhythm/pattern dataset.
+        Best-effort — never blocks finishing a session."""
+        try:
+            nums = getattr(self, 'history_nums', [])
+            if not self.db_path or len(nums) < 10:
+                return False
+            log_path = os.path.join(os.path.dirname(self.db_path), "croupier_log.txt")
+            label = (str(self.nombre_mesa).strip() or "session")
+            try:
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                stamp = ""
+            line = " ".join(str(int(n)) for n in nums)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n@ {label} {stamp}\n{line}\n")
+            return True
+        except Exception:
+            return False
+
     def finalizar_sesion(self, e=None):
         profit   = round(self.banca_actual - self.banca_inicial, 2)
         pl_pct   = (profit / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
@@ -3797,6 +3819,7 @@ class LinupApp:
 
         ok, err_msg    = self._guardar_sesion()
         self._update_table_stats(profit >= 0)
+        draws_logged   = self._log_draw_sequence()
         guardado_txt   = "Saved to history" if ok else f"Error: {err_msg}"
         guardado_color = '#2ecc71' if ok else '#ff4444'
 
@@ -3834,6 +3857,9 @@ class LinupApp:
                 ),
                 ft.Container(height=10),
                 ft.Text(guardado_txt, color=guardado_color, size=13),
+                ft.Text(f"{len(self.history_nums)} draws logged for AI dataset"
+                        if draws_logged else "",
+                        color='#9b59b6', size=11),
             ],
         )
         dlg.actions = [

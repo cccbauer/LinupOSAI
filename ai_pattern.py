@@ -73,9 +73,16 @@ class PatternDetector:
         if b is None:
             return
         self.colors.append(b)
+        # Once past the warmup, keep re-checking every draw and LOCK onto the
+        # first real pattern that appears (BIAS / STREAK / ALTERNATE). A 'none'
+        # opening no longer strands the whole session — you only sit out until a
+        # pattern emerges. Uses all colours so far (more data = steadier read).
         if not self.locked and len(self.colors) >= self.warmup:
-            self.kind, self.rule = self._classify(self.colors[:self.warmup])
-            self.locked = True
+            kind, rule = self._classify(self.colors)
+            if rule is not None:
+                self.kind, self.rule, self.locked = kind, rule, True
+            else:
+                self.kind = "none"   # still searching; not committed
 
     def observe_sequence(self, nums):
         self.reset()
@@ -106,8 +113,9 @@ class PatternDetector:
                 "kind": self.kind, "predict": self.predict_color()}
 
     def status_text(self):
-        if not self.locked:
-            return f"PATTERN: observing {len(self.colors)}/{self.warmup}"
-        if self.kind == "none":
-            return "PATTERN: none — sit out"
-        return f"PATTERN: {self.kind} → bet {self.predict_color()}"
+        n = len(self.colors)
+        if self.locked:
+            return f"PATTERN: {self.kind} → bet {self.predict_color()}"
+        if n < self.warmup:
+            return f"PATTERN: observing {n}/{self.warmup}"
+        return f"PATTERN: searching… {n} draws, no clear pattern yet"
