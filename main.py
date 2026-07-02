@@ -256,7 +256,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.1-AI"
+        self.page.title      = "Linup v19.1.2-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -847,7 +847,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.1-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.2-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -2404,24 +2404,22 @@ class LinupApp:
                 'cur_test_roi': cur_roi, 'improvement': cand_roi - cur_roi}
 
     # ── #2: entry-policy learning (train/test on the player's real bets) ─────
-    def _learn_entry_policy_candidate(self, min_entries=20, min_per_kind=5):
-        """From real bets: learn which regimes the player's ENTRIES win in on a
-        train split, then check filtering to those regimes improves held-out ROI."""
+    def _learn_entry_policy_candidate(self, min_entries=20, min_per_kind=5,
+                                      train_frac=0.6):
+        """From real bets: learn which regimes the player's ENTRIES win in on the
+        earlier bets, then check filtering to those regimes improves ROI on the
+        LATER (held-out) bets. Temporal past→future split — works within a single
+        session and is the honest test for an entry policy."""
         acted = [r for r in self._read_bet_log()
                  if r.get('acted') and r.get('is_win') is not None]
         if len(acted) < min_entries:
             return {'ok': False,
                     'reason': f'need ≥{min_entries} graded entries, have {len(acted)}'}
-        sess = sorted({r.get('session') for r in acted},
-                      key=lambda x: (x is None, x))
-        train_s = set(sess[::2])
-        train = [r for r in acted if r.get('session') in train_s]
-        test = [r for r in acted if r.get('session') not in train_s]
-        if not train or not test:
+        cut = max(1, int(len(acted) * train_frac))
+        train, test = acted[:cut], acted[cut:]
+        if not test:
             return {'ok': False,
-                    'reason': f'need entries from ≥2 sessions — have {len(acted)} '
-                              f'entr{"y" if len(acted) == 1 else "ies"} in '
-                              f'{len(sess)} session{"" if len(sess) == 1 else "s"}'}
+                    'reason': 'not enough entries to hold out a test set'}
 
         def roi(rs):
             c = sum(r.get('cost', 0) or 0 for r in rs)
