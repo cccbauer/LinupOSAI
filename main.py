@@ -2441,6 +2441,125 @@ class LinupApp:
                 'improvement': test_pol - test_all,
                 'n_train': len(train), 'n_test': len(test)}
 
+    def _export_bet_eval_csv(self):
+        """Write the Bet Eval stats + raw per-spin bet log to a shareable CSV.
+        Saves to ~/Downloads (fallback: next to the DB, then home). Returns path
+        or None."""
+        import csv as _csv
+        s = self._compute_bet_eval()
+        log_rows = self._read_bet_log()
+        try:
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        except Exception:
+            ts = '0'
+        dl = os.path.join(os.path.expanduser('~'), 'Downloads')
+        base = (dl if os.path.isdir(dl)
+                else (os.path.dirname(self.db_path) if getattr(self, 'db_path', None)
+                      else os.path.expanduser('~')))
+        path = os.path.join(base, f"LinupOS_BetEval_{ts}.csv")
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                w = _csv.writer(f)
+                w.writerow(['LINUP BET EVAL EXPORT'])
+                try:
+                    w.writerow(['Export date',
+                                datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+                except Exception:
+                    pass
+                w.writerow([])
+                if not s.get('empty'):
+                    w.writerow(['ENTRY BEHAVIOUR'])
+                    w.writerow(['spins', s['spins']])
+                    w.writerow(['entered', s['entered']])
+                    w.writerow(['entry_rate_pct', f"{s['entry_rate']:.1f}"])
+                    w.writerow(['passed', s['passed']])
+                    w.writerow(['suggestion_shown', s['sug_shown']])
+                    w.writerow(['suggestion_entered', s['sug_entered']])
+                    if s['avg_wait'] is not None:
+                        w.writerow(['avg_wait_spins', f"{s['avg_wait']:.1f}"])
+                    w.writerow([])
+                    w.writerow(['REALIZED RESULTS (bets placed)'])
+                    w.writerow(['entries', s['entered']])
+                    w.writerow(['win_rate_pct',
+                                '' if s['win'] is None else f"{s['win']:.0f}"])
+                    w.writerow(['net', f"{s['net']:.2f}"])
+                    w.writerow(['staked', f"{s['staked']:.2f}"])
+                    w.writerow(['roi_pct', f"{s['roi']:.2f}"])
+                    w.writerow([])
+                    w.writerow(['BY REGIME', 'entries', 'win_pct', 'net', 'roi_pct'])
+                    for rr in s['regimes']:
+                        w.writerow([rr['kind'], rr['entries'],
+                                    '' if rr['win'] is None else f"{rr['win']:.0f}",
+                                    f"{rr['net']:.2f}", f"{rr['roi']:.1f}"])
+                    w.writerow([])
+                    w.writerow(['FOLLOWED vs FREELANCED', 'entries', 'win_pct',
+                                'net', 'roi_pct'])
+                    for lbl, b in (('followed', s['followed']),
+                                   ('freelanced', s['freelanced'])):
+                        w.writerow([lbl, b['entries'],
+                                    '' if b['win'] is None else f"{b['win']:.0f}",
+                                    f"{b['net']:.2f}", f"{b['roi']:.1f}"])
+                    w.writerow([])
+                    w.writerow(['SUGGESTION SCOREBOARD', 'entries',
+                                'hit_within3_pct', 'roi_pct'])
+                    for sc in s.get('scoreboard', []):
+                        w.writerow([sc['cat'], sc['entries'],
+                                    f"{sc['hitrate']:.0f}", f"{sc['roi']:.1f}"])
+                    w.writerow([])
+                cand = self._tune_rvs_candidate()
+                w.writerow(['RVS TUNING (held-out)'])
+                if cand.get('ok'):
+                    w.writerow(['n_train_dealers', cand['n_train']])
+                    w.writerow(['n_test_dealers', cand['n_test']])
+                    w.writerow(['current_heldout_roi_pct', f"{cand['cur_test_roi']:.2f}"])
+                    w.writerow(['candidate_heldout_roi_pct', f"{cand['cand_test_roi']:.2f}"])
+                    w.writerow(['improvement_pct', f"{cand['improvement']:.2f}"])
+                    c = cand['candidate']
+                    w.writerow(['candidate_cfg',
+                                f"streak>={c['streak']} rhythm<={c['rhythm']} "
+                                f"ride>={c['ride_len']} bias>={c['bias']}"])
+                else:
+                    w.writerow(['status', cand.get('reason', '')])
+                w.writerow([])
+                pol = self._learn_entry_policy_candidate()
+                w.writerow(['ENTRY POLICY (held-out)'])
+                if pol.get('ok'):
+                    w.writerow(['n_train_entries', pol['n_train']])
+                    w.writerow(['n_test_entries', pol['n_test']])
+                    w.writerow(['recommended_regimes',
+                                ', '.join(pol['policy']) or '(none)'])
+                    w.writerow(['test_all_roi_pct', f"{pol['test_all_roi']:.1f}"])
+                    w.writerow(['test_filtered_roi_pct', f"{pol['test_policy_roi']:.1f}"])
+                    w.writerow(['improvement_pct', f"{pol['improvement']:.1f}"])
+                    w.writerow(['regime', 'train_entries', 'train_roi_pct'])
+                    for k, (nk, rk) in sorted(pol['train_bykind'].items(),
+                                              key=lambda kv: -kv[1][1]):
+                        w.writerow([k, nk, f"{rk:.1f}"])
+                else:
+                    w.writerow(['status', pol.get('reason', '')])
+                w.writerow([])
+                w.writerow(['RAW BETS (one row per spin)'])
+                w.writerow(['ts', 'table', 'session', 'spin', 'num', 'live', 'acted',
+                            'bet', 'followed_suggestion', 'sug_dozen', 'sug_color',
+                            'regime_kind', 'regime_color', 'run', 'frac_red', 'prep',
+                            'is_win', 'delta', 'cost', 'bank_after', 'spins_since_entry'])
+                for r in log_rows:
+                    sug = r.get('suggested') or {}
+                    reg = r.get('regime') or {}
+                    w.writerow([
+                        r.get('ts', ''), r.get('table', ''), r.get('session', ''),
+                        r.get('spin', ''), r.get('num', ''), r.get('live', ''),
+                        r.get('acted', ''), '|'.join(r.get('bet') or []),
+                        r.get('followed_suggestion', ''), sug.get('dozen', ''),
+                        sug.get('color', ''), reg.get('kind', ''), reg.get('color', ''),
+                        reg.get('run', ''), reg.get('frac_red', ''), reg.get('prep', ''),
+                        r.get('is_win', ''), r.get('delta', ''), r.get('cost', ''),
+                        r.get('bank_after', ''), r.get('spins_since_entry', ''),
+                    ])
+            return path
+        except Exception:
+            return None
+
     def _roi_bars(self, items):
         """items: [(label, value_float)] -> a horizontal bar chart Container.
         Bars grow right (green, +) / left (red, −) from a centre zero line; the
@@ -2520,6 +2639,19 @@ class LinupApp:
             except Exception:
                 pass
             self.show_bet_eval_view(investment_id)
+
+        def _export(ev):
+            p = self._export_bet_eval_csv()
+            dlg = ft.AlertDialog(
+                title=ft.Text("Export CSV", color='#3498db',
+                              weight=ft.FontWeight.BOLD),
+                content=ft.Text(f"Saved to:\n{p}" if p else "Export failed.",
+                                color=ft.Colors.WHITE, selectable=True, size=12),
+                modal=True, bgcolor='#1e1e1e')
+            dlg.actions = [ft.ElevatedButton(
+                "OK", on_click=lambda _e: (setattr(dlg, 'open', False), dlg.update()),
+                style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE))]
+            self.page.show_dialog(dlg)
 
         def pct(x):
             return '--' if x is None else f"{x:.0f}%"
@@ -2669,7 +2801,11 @@ class LinupApp:
                                 "BACK", on_click=go_back,
                                 style=ft.ButtonStyle(bgcolor='#34495e',
                                                      color=ft.Colors.WHITE)),
-                            ft.Text("AI BET EVAL  —  all logged play",
+                            ft.ElevatedButton(
+                                "⬇ CSV", on_click=_export,
+                                style=ft.ButtonStyle(bgcolor='#16a085',
+                                                     color=ft.Colors.WHITE)),
+                            ft.Text("AI BET EVAL",
                                     color=ft.Colors.WHITE, size=13,
                                     weight=ft.FontWeight.BOLD, expand=True,
                                     text_align=ft.TextAlign.RIGHT),
