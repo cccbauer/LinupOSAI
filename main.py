@@ -256,7 +256,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.3-AI"
+        self.page.title      = "Linup v19.1.5-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -848,7 +848,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.3-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.5-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -2758,9 +2758,15 @@ class LinupApp:
             line(f"cfg: streak≥{c['streak']}  rhythm≤{c['rhythm']}  "
                  f"ride≥{c['ride_len']}  bias≥{c['bias']}", '#aaaaaa')
             if cand['improvement'] > 0.5:
-                rows.append(ft.ElevatedButton(
-                    "APPLY TUNED CONFIG", on_click=_apply_cfg(c), height=42,
-                    style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
+                already = all(RVS_CFG.get(k) == c[k]
+                              for k in ('streak', 'rhythm', 'ride_len', 'bias'))
+                if already:
+                    rows.append(ft.Text("✓ APPLIED", color='#2ecc71', size=14,
+                                        weight=ft.FontWeight.BOLD))
+                else:
+                    rows.append(ft.ElevatedButton(
+                        "APPLY TUNED CONFIG", on_click=_apply_cfg(c), height=42,
+                        style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
                 line("Beats current on data it wasn't tuned on. Applies on tap only.",
                      '#7f8c8d')
             else:
@@ -2791,10 +2797,15 @@ class LinupApp:
                 f"filtered {pol['test_policy_roi']:+.1f}%  (Δ {pol['improvement']:+.1f})",
                 color=cc, size=13))
             if pol['policy'] and pol['improvement'] > 0.5:
-                rows.append(ft.ElevatedButton(
-                    "APPLY ENTRY FILTER", on_click=_apply_policy(pol['policy']),
-                    height=42,
-                    style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
+                already = getattr(self, 'entry_policy', None) == set(pol['policy'])
+                if already:
+                    rows.append(ft.Text("✓ APPLIED", color='#2ecc71', size=14,
+                                        weight=ft.FontWeight.BOLD))
+                else:
+                    rows.append(ft.ElevatedButton(
+                        "APPLY ENTRY FILTER", on_click=_apply_policy(pol['policy']),
+                        height=42,
+                        style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
                 line("The AI bar will flag ENTER/SKIP by regime. Applies on tap only.",
                      '#7f8c8d')
             else:
