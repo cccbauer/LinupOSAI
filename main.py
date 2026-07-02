@@ -2373,9 +2373,11 @@ class LinupApp:
                         break
         return net, staked
 
-    def _tune_rvs_candidate(self, min_dealers=8):
+    def _tune_rvs_candidate(self, min_dealers=8, confident_test=20):
         """Fit RVS thresholds on a train split, validate on a held-out split.
-        Returns the candidate + its held-out ROI vs the current config's."""
+        Returns the candidate + its held-out ROI vs the current config's.
+        'confident' is False when the held-out set is too thin to trust the
+        result yet (still 'ok' — just flagged WAIT rather than hidden)."""
         dealers = self._load_dealer_sequences()
         if len(dealers) < min_dealers:
             return {'ok': False,
@@ -2402,15 +2404,19 @@ class LinupApp:
         cur_roi = roi(test, dict(RVS_CFG))
         return {'ok': True, 'n_train': len(train), 'n_test': len(test),
                 'candidate': cand, 'cand_test_roi': cand_roi,
-                'cur_test_roi': cur_roi, 'improvement': cand_roi - cur_roi}
+                'cur_test_roi': cur_roi, 'improvement': cand_roi - cur_roi,
+                'confident': len(test) >= confident_test}
 
     # ── #2: entry-policy learning (train/test on the player's real bets) ─────
     def _learn_entry_policy_candidate(self, min_entries=20, min_per_kind=5,
-                                      train_frac=0.6):
+                                      train_frac=0.6, confident_test=40,
+                                      confident_kind=15):
         """From real bets: learn which regimes the player's ENTRIES win in on the
         earlier bets, then check filtering to those regimes improves ROI on the
         LATER (held-out) bets. Temporal past→future split — works within a single
-        session and is the honest test for an entry policy."""
+        session and is the honest test for an entry policy.
+        'confident' is False when the held-out set or the thinnest recommended
+        regime is too small to trust yet (still 'ok' — just flagged WAIT)."""
         acted = [r for r in self._read_bet_log()
                  if r.get('acted') and r.get('is_win') is not None]
         if len(acted) < min_entries:
@@ -2435,11 +2441,15 @@ class LinupApp:
         test_all = roi(test)
         test_pol = roi([r for r in test
                         if (r.get('regime') or {}).get('kind', '?') in policy])
+        train_bykind = {k: (len(rs), roi(rs)) for k, rs in bykind.items()}
+        min_kind_n = min((train_bykind[k][0] for k in policy), default=0)
         return {'ok': True, 'policy': sorted(policy),
-                'train_bykind': {k: (len(rs), roi(rs)) for k, rs in bykind.items()},
+                'train_bykind': train_bykind,
                 'test_all_roi': test_all, 'test_policy_roi': test_pol,
                 'improvement': test_pol - test_all,
-                'n_train': len(train), 'n_test': len(test)}
+                'n_train': len(train), 'n_test': len(test),
+                'confident': (len(test) >= confident_test
+                              and min_kind_n >= confident_kind)}
 
     def _export_bet_eval_csv(self):
         """Write the Bet Eval stats + raw per-spin bet log to a shareable CSV.
@@ -2509,6 +2519,8 @@ class LinupApp:
                 cand = self._tune_rvs_candidate()
                 w.writerow(['RVS TUNING (held-out)'])
                 if cand.get('ok'):
+                    w.writerow(['confidence',
+                                'OK' if cand.get('confident') else 'WAIT - small sample'])
                     w.writerow(['n_train_dealers', cand['n_train']])
                     w.writerow(['n_test_dealers', cand['n_test']])
                     w.writerow(['current_heldout_roi_pct', f"{cand['cur_test_roi']:.2f}"])
@@ -2524,6 +2536,8 @@ class LinupApp:
                 pol = self._learn_entry_policy_candidate()
                 w.writerow(['ENTRY POLICY (held-out)'])
                 if pol.get('ok'):
+                    w.writerow(['confidence',
+                                'OK' if pol.get('confident') else 'WAIT - small sample'])
                     w.writerow(['n_train_entries', pol['n_train']])
                     w.writerow(['n_test_entries', pol['n_test']])
                     w.writerow(['recommended_regimes',
@@ -2729,6 +2743,9 @@ class LinupApp:
         if not cand.get('ok'):
             line(cand.get('reason', '—'), '#f1c40f')
         else:
+            if not cand.get('confident'):
+                line(f"⏳ WAIT — only {cand['n_test']} held-out dealers, "
+                     f"treat as provisional", '#f1c40f')
             line(f"Fit on {cand['n_train']} dealers, tested on {cand['n_test']} "
                  f"held-out.")
             line(f"Current config held-out ROI: {cand['cur_test_roi']:+.2f}%")
@@ -2757,6 +2774,9 @@ class LinupApp:
         if not pol.get('ok'):
             line(pol.get('reason', '—'), '#f1c40f')
         else:
+            if not pol.get('confident'):
+                line(f"⏳ WAIT — only {pol['n_test']} held-out entries, "
+                     f"treat as provisional", '#f1c40f')
             line(f"Fit on {pol['n_train']} entries, tested on {pol['n_test']} "
                  f"held-out.  (bar = ROI per regime, train)")
             rows.append(self._roi_bars(
