@@ -179,13 +179,22 @@ def cond_color_for(dozen, history):
 #     python3 ai_combo_eval.py --sweep-rvs ~/linup_data/croupier_log.txt
 RVS_WINDOW, RVS_STREAK_THR, RVS_RHYTHM_THR = 12, 0.60, 0.40
 RVS_MIN, RVS_RHYTHM_RUN, RVS_RIDE_LEN, RVS_BIAS_MARGIN = 6, 2, 4, 0.15
+# Live, TUNABLE config. The deployed values above are the defaults; a validated
+# candidate the player applies from the Bet Eval page overwrites this dict (and
+# is persisted to linup_data/rvs_config.json, reloaded at startup). Never
+# auto-applied — only on explicit approval after passing a held-out test.
+RVS_CFG = {'window': RVS_WINDOW, 'streak': RVS_STREAK_THR, 'rhythm': RVS_RHYTHM_THR,
+           'min': RVS_MIN, 'rhythm_run': RVS_RHYTHM_RUN, 'ride_len': RVS_RIDE_LEN,
+           'bias': RVS_BIAS_MARGIN}
 
 
-def _regime(history):
-    """Classify the recent colour regime. Returns (pred_bit|None, kind, detail):
-    kind in 'watching' / 'BIAS' / 'STREAK' / 'RHYTHM' / 'none'."""
-    cols = [1 if n in ROJOS else 0 for n in history if n != 0][-RVS_WINDOW:]
-    if len(cols) < RVS_MIN:
+def _regime(history, cfg=None):
+    """Classify the recent colour regime under `cfg` (defaults to live RVS_CFG).
+    Returns (pred_bit|None, kind, detail); kind in
+    'watching' / 'BIAS' / 'STREAK' / 'RHYTHM' / 'none'."""
+    c = cfg or RVS_CFG
+    cols = [1 if n in ROJOS else 0 for n in history if n != 0][-int(c['window']):]
+    if len(cols) < c['min']:
         return (None, 'watching', {'n': len(cols)})
     reps = sum(cols[i] == cols[i - 1] for i in range(1, len(cols)))
     prep = reps / (len(cols) - 1)
@@ -197,20 +206,20 @@ def _regime(history):
             run += 1
         else:
             break
-    if abs(frac_red - 0.5) >= RVS_BIAS_MARGIN:          # BIAS: ride dominant
+    if abs(frac_red - 0.5) >= c['bias']:            # BIAS: ride dominant
         return (1 if frac_red > 0.5 else 0, 'BIAS', {'frac': frac_red})
-    if run >= RVS_RIDE_LEN:                             # STREAK now: ride run
+    if run >= c['ride_len']:                        # STREAK now: ride run
         return (last, 'STREAK', {'run': run})
-    if prep >= RVS_STREAK_THR and run >= 2:             # streaky: ride
+    if prep >= c['streak'] and run >= 2:            # streaky: ride
         return (last, 'STREAK', {'run': run})
-    if prep <= RVS_RHYTHM_THR and run >= RVS_RHYTHM_RUN:  # rhythmic: flip
+    if prep <= c['rhythm'] and run >= c['rhythm_run']:  # rhythmic: flip
         return (1 - last, 'RHYTHM', {'run': run})
     return (None, 'none', {'prep': prep, 'frac': frac_red})
 
 
-def regime_color(history):
+def regime_color(history, cfg=None):
     """'R' / 'B' / None — colour to append to the live dozen suggestion."""
-    pred, _, _ = _regime(history)
+    pred, _, _ = _regime(history, cfg)
     if pred is None:
         return None
     return 'R' if pred == 1 else 'B'
@@ -247,7 +256,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.0.0-AI"
+        self.page.title      = "Linup v19.1.0-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -484,6 +493,14 @@ class LinupApp:
                 continue
         if not self.db_path:
             self.db_error = f"All paths failed. Last: {self.db_error}"
+        # Load any user-applied RVS tuning + entry-policy (from the Bet Eval
+        # page). Never auto-set — only what the player previously approved.
+        self.entry_policy = None
+        try:
+            self._load_rvs_config()
+            self.entry_policy = self._load_entry_policy()
+        except Exception:
+            pass
 
     def _get_conn(self):
         if not self.db_path:
@@ -830,7 +847,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.0.0-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.0-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -1573,6 +1590,9 @@ class LinupApp:
                                    iid=investment_id, it=db_inv_type):
                     self.show_edit_sessions(iid, n, c, it)
 
+                def _open_bet_eval(_, iid=investment_id):
+                    self.show_bet_eval_view(iid)
+
                 table_rows.append(ft.Container(height=6))
                 table_rows.append(
                     ft.Row(
@@ -1596,6 +1616,20 @@ class LinupApp:
                                 on_click=_edit_sessions,
                                 expand=True, height=45,
                                 style=ft.ButtonStyle(bgcolor='#d35400',
+                                                     color=ft.Colors.WHITE),
+                            ),
+                        ],
+                        spacing=8,
+                    )
+                )
+                table_rows.append(
+                    ft.Row(
+                        controls=[
+                            ft.ElevatedButton(
+                                "AI BET EVAL",
+                                on_click=_open_bet_eval,
+                                expand=True, height=45,
+                                style=ft.ButtonStyle(bgcolor='#16a085',
                                                      color=ft.Colors.WHITE),
                             ),
                         ],
@@ -2110,6 +2144,516 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # ACTUAL GROWTH GRAPH
     # ──────────────────────────────────────────────────────────────────
+    def _read_bet_log(self) -> list:
+        """Load all per-spin records from bet_log.jsonl (best-effort)."""
+        import json
+        rows = []
+        path = (os.path.join(os.path.dirname(self.db_path), 'bet_log.jsonl')
+                if getattr(self, 'db_path', None) else None)
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                rows.append(json.loads(line))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        return rows
+
+    def _compute_bet_eval(self) -> dict:
+        """Analyse the real-bet log (bet_log.jsonl) — the player's realized entry
+        decisions and outcomes. Returns a stats dict, or {'empty': True}."""
+        rows = self._read_bet_log()
+        if not rows:
+            return {'empty': True}
+
+        def roi(rs):
+            cost = sum(r.get('cost', 0) or 0 for r in rs)
+            net = sum(r.get('delta', 0) or 0 for r in rs)
+            return net, cost, (100 * net / cost if cost else 0.0)
+
+        def winrate(rs):
+            g = [r for r in rs if r.get('is_win') is not None]
+            if not g:
+                return None
+            return 100 * sum(1 for r in g if r['is_win']) / len(g)
+
+        def block(rs):
+            n, c, ro = roi(rs)
+            return {'entries': len(rs), 'win': winrate(rs), 'net': n, 'roi': ro}
+
+        scoreboard = self._suggestion_scoreboard(rows)
+        acted = [r for r in rows if r.get('acted')]
+        passed = [r for r in rows if not r.get('acted')]
+        sug = [r for r in rows if (r.get('suggested') or {}).get('dozen')]
+        waits = [r.get('spins_since_entry') for r in acted
+                 if isinstance(r.get('spins_since_entry'), int)]
+        by_regime = {}
+        for r in acted:
+            by_regime.setdefault((r.get('regime') or {}).get('kind', '?'), []).append(r)
+        regimes = [dict(kind=k, **block(rs))
+                   for k, rs in sorted(by_regime.items(), key=lambda kv: -len(kv[1]))]
+        graded = sum(1 for r in acted if r.get('is_win') is not None)
+        return {
+            'empty': False,
+            'spins': len(rows), 'entered': len(acted), 'passed': len(passed),
+            'entry_rate': 100 * len(acted) / len(rows),
+            'sug_shown': len(sug), 'sug_entered': sum(1 for r in sug if r.get('acted')),
+            'avg_wait': (sum(waits) / len(waits) if waits else None),
+            'graded': graded, **{k: v for k, v in zip(('net', 'staked', 'roi'), roi(acted))},
+            'win': winrate(acted),
+            'regimes': regimes,
+            'followed': block([r for r in acted if r.get('followed_suggestion')]),
+            'freelanced': block([r for r in acted if not r.get('followed_suggestion')]),
+            'scoreboard': scoreboard,
+        }
+
+    def _suggestion_scoreboard(self, rows) -> list:
+        """Counterfactual: for every logged spin, score EACH category's on-screen
+        suggestion against the real outcome under the 1/2/3 chip-in progression
+        (straight-up 35:1). Answers 'which suggestion types actually pay'. Uses
+        the logged number sequence per session; needs records that carry the
+        'suggestions' field (logged from v19.0.1+). Returns [] if none do."""
+        PROG = (1, 2, 3)
+        sessions = {}
+        for r in rows:
+            sessions.setdefault(r.get('session'), []).append(r)
+        cats = {}
+        for _sid, rs in sessions.items():
+            rs = sorted(rs, key=lambda r: r.get('spin', 0))
+            nums = [r.get('num') for r in rs]
+            for i, r in enumerate(rs):
+                sug = r.get('suggestions')
+                if not sug or i + 3 > len(nums):   # need this spin + 2 forward
+                    continue
+                window = nums[i:i + 3]
+                for cat, groups in sug.items():
+                    if not groups:
+                        continue
+                    covered = set()
+                    for g in groups:
+                        covered |= GRUPOS_MAESTROS.get(g, set())
+                    if not covered:
+                        continue
+                    K = len(covered)
+                    pl, hit, staked = 0, False, 0
+                    for stake, spin in zip(PROG, window):
+                        pl -= stake * K
+                        staked += stake * K
+                        if spin in covered:
+                            pl += 36 * stake
+                            hit = True
+                            break
+                    d = cats.setdefault(cat, {'entries': 0, 'hits': 0,
+                                              'net': 0, 'staked': 0, 'cov': 0})
+                    d['entries'] += 1
+                    d['hits'] += int(hit)
+                    d['net'] += pl
+                    d['staked'] += staked
+                    d['cov'] += K
+        out = []
+        for cat, d in cats.items():
+            e = d['entries']
+            if not e:
+                continue
+            out.append({'cat': cat, 'entries': e,
+                        'hitrate': 100 * d['hits'] / e,
+                        'roi': 100 * d['net'] / d['staked'] if d['staked'] else 0.0,
+                        'net': d['net'], 'avg_cov': d['cov'] / e})
+        out.sort(key=lambda x: -x['roi'])
+        return out
+
+    # ── persistence for user-applied tuning / entry policy ───────────────────
+    def _cfg_path(self, name):
+        return (os.path.join(os.path.dirname(self.db_path), name)
+                if getattr(self, 'db_path', None) else None)
+
+    def _load_rvs_config(self):
+        import json
+        p = self._cfg_path('rvs_config.json')
+        if p and os.path.exists(p):
+            with open(p, encoding='utf-8') as f:
+                cfg = json.load(f)
+            for k in list(RVS_CFG.keys()):
+                if k in cfg:
+                    RVS_CFG[k] = cfg[k]
+
+    def _save_rvs_config(self, cfg):
+        import json
+        RVS_CFG.clear()
+        RVS_CFG.update(cfg)
+        p = self._cfg_path('rvs_config.json')
+        if p:
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f)
+
+    def _load_entry_policy(self):
+        import json
+        p = self._cfg_path('entry_policy.json')
+        if p and os.path.exists(p):
+            with open(p, encoding='utf-8') as f:
+                d = json.load(f)
+            ks = d.get('kinds')
+            return set(ks) if ks else None
+        return None
+
+    def _save_entry_policy(self, kinds):
+        import json
+        self.entry_policy = set(kinds) if kinds else None
+        p = self._cfg_path('entry_policy.json')
+        if p:
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump({'kinds': sorted(kinds) if kinds else []}, f)
+
+    # ── #1: validated RVS auto-tune (train/test, never auto-applied) ─────────
+    def _load_dealer_sequences(self):
+        """[(label,[nums])] from croupier_log.txt + bundled croupier_data.txt."""
+        import re
+        seqs, paths = [], []
+        if getattr(self, 'db_path', None):
+            paths.append(os.path.join(os.path.dirname(self.db_path), 'croupier_log.txt'))
+        paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'croupier_data.txt'))
+        for path in paths:
+            if not path or not os.path.exists(path):
+                continue
+            label, nums = None, []
+            try:
+                for raw in open(path, encoding='utf-8'):
+                    line = raw.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if line.startswith('@'):
+                        if nums:
+                            seqs.append((label or f'd{len(seqs)+1}', nums))
+                        label, nums = line[1:].strip() or None, []
+                    else:
+                        nums.extend(int(x) for x in re.findall(r'\d+', line)
+                                    if 0 <= int(x) <= 36)
+                if nums:
+                    seqs.append((label or f'd{len(seqs)+1}', nums))
+            except Exception:
+                pass
+        return seqs
+
+    @staticmethod
+    def _pick_dozen_sa(window6):
+        sc = {d: sum(DOZEN_SECTOR_AFFINITY[d].get(SECTOR_OF.get(n), 0.0)
+                     for n in window6) / 6.0 for d in ('1a', '2a', '3a')}
+        ranked = sorted(sc.items(), key=lambda kv: kv[1], reverse=True)
+        if ranked[0][1] <= 0 or abs(ranked[0][1] - ranked[1][1]) < 1e-9:
+            return None
+        return ranked[0][0]
+
+    def _eval_rvs(self, dealers, cfg):
+        """Net chips & staked over dealers: sector dozen + RVS(cfg) colour, ridden
+        under the 1/2/3 chip-in progression (straight-up 35:1)."""
+        PROG = (1, 2, 3)
+        net = staked = 0
+        for _lbl, nums in dealers:
+            for i in range(6, len(nums) - 2):
+                dozen = self._pick_dozen_sa(nums[i - 6:i])
+                if not dozen:
+                    continue
+                color = regime_color(nums[:i], cfg)
+                cov = GRUPOS_MAESTROS.get(f'{dozen}{_DOC_SFX.get(color, "_L")}')
+                if not cov:
+                    continue
+                K = len(cov)
+                for stake, spin in zip(PROG, nums[i:i + 3]):
+                    net -= stake * K
+                    staked += stake * K
+                    if spin in cov:
+                        net += 36 * stake
+                        break
+        return net, staked
+
+    def _tune_rvs_candidate(self, min_dealers=8):
+        """Fit RVS thresholds on a train split, validate on a held-out split.
+        Returns the candidate + its held-out ROI vs the current config's."""
+        dealers = self._load_dealer_sequences()
+        if len(dealers) < min_dealers:
+            return {'ok': False,
+                    'reason': f'need ≥{min_dealers} dealers, have {len(dealers)}'}
+        train = [d for i, d in enumerate(dealers) if i % 2 == 0]
+        test = [d for i, d in enumerate(dealers) if i % 2 == 1]
+
+        def roi(ds, cfg):
+            n, s = self._eval_rvs(ds, cfg)
+            return (100 * n / s if s else 0.0)
+
+        best = None
+        for streak in (0.55, 0.60, 0.65):
+            for rhythm in (0.30, 0.35, 0.40):
+                for ride in (4, 5):
+                    for bias in (0.12, 0.15, 0.20):
+                        cfg = {**RVS_CFG, 'streak': streak, 'rhythm': rhythm,
+                               'ride_len': ride, 'bias': bias}
+                        r = roi(train, cfg)
+                        if best is None or r > best[0]:
+                            best = (r, cfg)
+        cand = best[1]
+        cand_roi = roi(test, cand)
+        cur_roi = roi(test, dict(RVS_CFG))
+        return {'ok': True, 'n_train': len(train), 'n_test': len(test),
+                'candidate': cand, 'cand_test_roi': cand_roi,
+                'cur_test_roi': cur_roi, 'improvement': cand_roi - cur_roi}
+
+    # ── #2: entry-policy learning (train/test on the player's real bets) ─────
+    def _learn_entry_policy_candidate(self, min_entries=20, min_per_kind=5):
+        """From real bets: learn which regimes the player's ENTRIES win in on a
+        train split, then check filtering to those regimes improves held-out ROI."""
+        acted = [r for r in self._read_bet_log()
+                 if r.get('acted') and r.get('is_win') is not None]
+        if len(acted) < min_entries:
+            return {'ok': False,
+                    'reason': f'need ≥{min_entries} graded entries, have {len(acted)}'}
+        sess = sorted({r.get('session') for r in acted},
+                      key=lambda x: (x is None, x))
+        train_s = set(sess[::2])
+        train = [r for r in acted if r.get('session') in train_s]
+        test = [r for r in acted if r.get('session') not in train_s]
+        if not train or not test:
+            return {'ok': False, 'reason': 'need entries from ≥2 sessions'}
+
+        def roi(rs):
+            c = sum(r.get('cost', 0) or 0 for r in rs)
+            n = sum(r.get('delta', 0) or 0 for r in rs)
+            return (100 * n / c if c else 0.0)
+
+        bykind = {}
+        for r in train:
+            bykind.setdefault((r.get('regime') or {}).get('kind', '?'), []).append(r)
+        policy = {k for k, rs in bykind.items()
+                  if len(rs) >= min_per_kind and roi(rs) > 0}
+        test_all = roi(test)
+        test_pol = roi([r for r in test
+                        if (r.get('regime') or {}).get('kind', '?') in policy])
+        return {'ok': True, 'policy': sorted(policy),
+                'train_bykind': {k: (len(rs), roi(rs)) for k, rs in bykind.items()},
+                'test_all_roi': test_all, 'test_policy_roi': test_pol,
+                'improvement': test_pol - test_all,
+                'n_train': len(train), 'n_test': len(test)}
+
+    def show_bet_eval_view(self, investment_id: int = None):
+        """AI Bet Eval page — how the player's real entry decisions performed
+        (reads bet_log.jsonl, global across all logged play)."""
+        s = self._compute_bet_eval()
+
+        def go_back(ev):
+            if investment_id is not None:
+                self.show_investment_dashboard(investment_id)
+            else:
+                self.show_main_menu()
+
+        def _apply_cfg(cfg):
+            def h(ev):
+                try:
+                    self._save_rvs_config(cfg)
+                except Exception:
+                    pass
+                self.show_bet_eval_view(investment_id)
+            return h
+
+        def _apply_policy(kinds):
+            def h(ev):
+                try:
+                    self._save_entry_policy(kinds)
+                except Exception:
+                    pass
+                self.show_bet_eval_view(investment_id)
+            return h
+
+        def _clear_policy(ev):
+            try:
+                self._save_entry_policy(None)
+            except Exception:
+                pass
+            self.show_bet_eval_view(investment_id)
+
+        def pct(x):
+            return '--' if x is None else f"{x:.0f}%"
+
+        rows = []
+
+        def hdr(t):
+            rows.append(ft.Text(t, color='#16a085', size=15,
+                                weight=ft.FontWeight.BOLD))
+
+        def line(t, c='#dddddd'):
+            rows.append(ft.Text(t, color=c, size=13))
+
+        def stat_row(label, b):
+            if not b['entries']:
+                line(f"{label}: (none)")
+                return
+            c = '#2ecc71' if b['roi'] >= 0 else '#ff5555'
+            rows.append(ft.Row(spacing=4, controls=[
+                ft.Text(label, color='#dddddd', size=13, width=110),
+                ft.Text(f"{b['entries']} bets", color='#aaaaaa', size=12, width=68),
+                ft.Text(f"win {pct(b['win'])}", color='#aaaaaa', size=12, width=68),
+                ft.Text(f"ROI {b['roi']:+.1f}%", color=c, size=13),
+            ]))
+
+        if s.get('empty'):
+            line("No bets logged yet.", '#f1c40f')
+            line("Play some sessions — every spin is logged — then reopen this page.")
+        else:
+            hdr("Entry behaviour")
+            line(f"Spins logged: {s['spins']}")
+            line(f"Entered (bet): {s['entered']}   ({s['entry_rate']:.0f}%)")
+            line(f"Passed (no bet): {s['passed']}")
+            line(f"Suggestion shown: {s['sug_shown']}   (entered {s['sug_entered']})")
+            if s['avg_wait'] is not None:
+                line(f"Avg wait before entry: {s['avg_wait']:.1f} spins")
+            rows.append(ft.Divider(color='#333'))
+
+            hdr("Realized results — bets you actually placed")
+            line(f"Entries: {s['entered']}    Win rate: {pct(s['win'])} ({s['graded']} graded)")
+            line(f"Net: {s['net']:+.2f}    Staked: {s['staked']:.2f}")
+            rows.append(ft.Text(
+                f"ROI: {s['roi']:+.2f}%",
+                color=('#2ecc71' if s['roi'] >= 0 else '#ff5555'),
+                size=18, weight=ft.FontWeight.BOLD))
+            rows.append(ft.Divider(color='#333'))
+
+            hdr("By regime (entries only)")
+            if not s['regimes']:
+                line("(no entries yet)")
+            for rr in s['regimes']:
+                stat_row(str(rr['kind']), rr)
+            rows.append(ft.Divider(color='#333'))
+
+            hdr("Following the suggested dozen vs freelancing")
+            stat_row("Followed", s['followed'])
+            stat_row("Freelanced", s['freelanced'])
+            rows.append(ft.Divider(color='#333'))
+
+            hdr("Suggestion scoreboard — every option (hit within 3)")
+            _CAT_NAME = {'docs': 'Dozen (+colour)', 'cols': 'Columns',
+                         'secs': 'Sectors', 'thirds': 'Thirds', 'wave': 'Waves'}
+            if not s.get('scoreboard'):
+                line("Needs spins logged with v19.0.1+ (all on-screen "
+                     "suggestions). Play more and reopen.", '#f1c40f')
+            else:
+                rows.append(ft.Row(spacing=4, controls=[
+                    ft.Text("option", color='#888', size=11, width=130),
+                    ft.Text("bets", color='#888', size=11, width=52),
+                    ft.Text("hit≤3", color='#888', size=11, width=58),
+                    ft.Text("ROI", color='#888', size=11),
+                ]))
+                for sc in s['scoreboard']:
+                    c = '#2ecc71' if sc['roi'] >= 0 else '#ff5555'
+                    rows.append(ft.Row(spacing=4, controls=[
+                        ft.Text(_CAT_NAME.get(sc['cat'], sc['cat']),
+                                color='#dddddd', size=13, width=130),
+                        ft.Text(f"{sc['entries']}", color='#aaaaaa', size=12, width=52),
+                        ft.Text(f"{sc['hitrate']:.0f}%", color='#aaaaaa', size=12, width=58),
+                        ft.Text(f"{sc['roi']:+.1f}%", color=c, size=13),
+                    ]))
+            rows.append(ft.Container(height=6))
+            line("Realized play (what you actually bet), not the every-spin "
+                 "backtest. The scoreboard is counterfactual — how each option "
+                 "type would have paid, following its suggestion.", '#7f8c8d')
+
+        # ── #1 RVS auto-tune (always shown; uses dealer sequences) ───────────
+        rows.append(ft.Divider(color='#16a085'))
+        hdr("Model tuning — RVS (held-out validated)")
+        cand = self._tune_rvs_candidate()
+        if not cand.get('ok'):
+            line(cand.get('reason', '—'), '#f1c40f')
+        else:
+            line(f"Fit on {cand['n_train']} dealers, tested on {cand['n_test']} "
+                 f"held-out.")
+            line(f"Current config held-out ROI: {cand['cur_test_roi']:+.2f}%")
+            cc = '#2ecc71' if cand['improvement'] >= 0 else '#ff5555'
+            rows.append(ft.Text(
+                f"Candidate held-out ROI: {cand['cand_test_roi']:+.2f}%  "
+                f"(Δ {cand['improvement']:+.2f})", color=cc, size=14,
+                weight=ft.FontWeight.BOLD))
+            c = cand['candidate']
+            line(f"cfg: streak≥{c['streak']}  rhythm≤{c['rhythm']}  "
+                 f"ride≥{c['ride_len']}  bias≥{c['bias']}", '#aaaaaa')
+            if cand['improvement'] > 0.5:
+                rows.append(ft.ElevatedButton(
+                    "APPLY TUNED CONFIG", on_click=_apply_cfg(c), height=42,
+                    style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
+                line("Beats current on data it wasn't tuned on. Applies on tap only.",
+                     '#7f8c8d')
+            else:
+                line("No candidate beats the current config out-of-sample — "
+                     "keeping current.", '#7f8c8d')
+
+        # ── #2 entry-policy learning (uses the player's real bets) ───────────
+        rows.append(ft.Divider(color='#16a085'))
+        hdr("Entry policy — your winning regimes (held-out validated)")
+        pol = self._learn_entry_policy_candidate()
+        if not pol.get('ok'):
+            line(pol.get('reason', '—'), '#f1c40f')
+        else:
+            line(f"Fit on {pol['n_train']} entries, tested on {pol['n_test']} "
+                 f"held-out.")
+            for k, (nk, rk) in sorted(pol['train_bykind'].items(),
+                                      key=lambda kv: -kv[1][1]):
+                cc = '#2ecc71' if rk >= 0 else '#ff5555'
+                rows.append(ft.Row(spacing=4, controls=[
+                    ft.Text(str(k), color='#dddddd', size=13, width=90),
+                    ft.Text(f"{nk} bets", color='#aaaaaa', size=12, width=70),
+                    ft.Text(f"{rk:+.1f}%", color=cc, size=13),
+                ]))
+            line(f"Recommend entering only: "
+                 f"{', '.join(pol['policy']) if pol['policy'] else '(none)'}")
+            cc = '#2ecc71' if pol['improvement'] >= 0 else '#ff5555'
+            rows.append(ft.Text(
+                f"Held-out: all {pol['test_all_roi']:+.1f}%  →  "
+                f"filtered {pol['test_policy_roi']:+.1f}%  (Δ {pol['improvement']:+.1f})",
+                color=cc, size=13))
+            if pol['policy'] and pol['improvement'] > 0.5:
+                rows.append(ft.ElevatedButton(
+                    "APPLY ENTRY FILTER", on_click=_apply_policy(pol['policy']),
+                    height=42,
+                    style=ft.ButtonStyle(bgcolor='#16a085', color=ft.Colors.WHITE)))
+                line("The AI bar will flag ENTER/SKIP by regime. Applies on tap only.",
+                     '#7f8c8d')
+            else:
+                line("Filtering doesn't improve held-out ROI — no filter "
+                     "recommended.", '#7f8c8d')
+        if getattr(self, 'entry_policy', None):
+            rows.append(ft.Row(spacing=8, controls=[
+                ft.Text(f"Active entry filter: {', '.join(sorted(self.entry_policy))}",
+                        color='#f1c40f', size=12, expand=True),
+                ft.ElevatedButton("CLEAR", on_click=_clear_policy, height=34,
+                                  style=ft.ButtonStyle(bgcolor='#7f8c8d',
+                                                       color=ft.Colors.WHITE)),
+            ]))
+
+        self._set_view(
+            ft.Container(
+                bgcolor='#1a1a1a', expand=True,
+                content=ft.Column(expand=True, controls=[
+                    ft.Container(
+                        bgcolor='#2c3e50',
+                        padding=ft.padding.only(left=8, right=8, top=36, bottom=8),
+                        content=ft.Row(controls=[
+                            ft.ElevatedButton(
+                                "BACK", on_click=go_back,
+                                style=ft.ButtonStyle(bgcolor='#34495e',
+                                                     color=ft.Colors.WHITE)),
+                            ft.Text("AI BET EVAL  —  all logged play",
+                                    color=ft.Colors.WHITE, size=13,
+                                    weight=ft.FontWeight.BOLD, expand=True,
+                                    text_align=ft.TextAlign.RIGHT),
+                        ]),
+                    ),
+                    ft.ListView(controls=rows, expand=True, spacing=6, padding=14),
+                ]),
+            )
+        )
+
     def show_actual_graph_view(self, investment_id: int, inv_name: str,
                                inv_capital: float, inv_type: str = 'FIAT',
                                mesa_usd_rate: dict = None, usd_capital: float = 0.0):
@@ -4822,6 +5366,52 @@ class LinupApp:
         except Exception:
             return (None, None)
 
+    def _all_suggestions(self) -> dict:
+        """Reproduce the suggestion shown for EVERY category this spin, as
+        {category: [group_keys]} (the groups a tap would bet). [] = no
+        suggestion / WAIT. Mirrors actualizar_sugerencias; used for the bet-eval
+        scoreboard so we can score every option, not just the one played."""
+        out = {}
+        try:
+            sw = list(self.sliding_window)
+            if len(sw) < 6:
+                return out
+            live = getattr(self, 'live_table_mode', False)
+            lf = getattr(self, 'live_filter', None)
+            cats = [('cols', ['34', '35', '36']), ('docs', ['1a', '2a', '3a']),
+                    ('secs', ['Z0', 'ZG', 'ZP', 'H']), ('thirds', ['T1', 'T2', 'T3']),
+                    ('wave', ['W1', 'W2', 'W3'])]
+            PAIR_BLOQUEADO = {'ZG', 'ZP'}
+            for key, grupos in cats:
+                def _score(g, _key=key):
+                    if live and _key == 'docs':
+                        return sum(DOZEN_SECTOR_AFFINITY[g].get(SECTOR_OF.get(n), 0.0)
+                                   for n in sw) / 6
+                    return sum(1 for n in sw if n in GRUPOS_MAESTROS[g]) / 6
+                stats = sorted(({'g': g, 'p': _score(g)} for g in grupos),
+                               key=lambda x: x['p'], reverse=True)
+                if live and key == 'docs':
+                    tie = (len(stats) > 1 and stats[0]['p'] > 0
+                           and abs(stats[0]['p'] - stats[1]['p']) < 1e-9)
+                    if tie or stats[0]['p'] <= 0:
+                        out[key] = []
+                    else:
+                        top = stats[0]['g']
+                        rcol = regime_color(self.history_nums) if (
+                            lf is None and getattr(self, 'ai_ok', False)) else None
+                        eff = lf if lf is not None else rcol
+                        out[key] = [f'{top}{_DOC_SFX.get(eff, "_L")}']
+                    continue
+                cand = {stats[0]['g'], stats[1]['g']}
+                if (stats[1]['p'] > stats[2 if len(stats) > 2 else 1]['p']
+                        and cand != PAIR_BLOQUEADO):
+                    out[key] = [stats[0]['g'], stats[1]['g']]
+                else:
+                    out[key] = []
+        except Exception:
+            pass
+        return out
+
     def _log_real_bet(self, num, acted, bet_groups, is_win, cost):
         """Append one per-spin JSONL record: the AI suggestion, the player's
         entry decision, and the outcome. Best-effort; never blocks a spin."""
@@ -4848,6 +5438,7 @@ class LinupApp:
             'bet': disp,
             'followed_suggestion': bool(sug_dozen and sug_dozen in disp),
             'suggested': {'dozen': sug_dozen, 'color': sug_color, 'combo': sug_combo},
+            'suggestions': self._all_suggestions(),
             'regime': {
                 'kind': kind,
                 'color': 'R' if pred == 1 else ('B' if pred == 0 else None),
@@ -5948,7 +6539,12 @@ class LinupApp:
         # this is the overlay that actually colours the dozen suggestion.
         if getattr(self, 'live_table_mode', False):
             try:
-                return "AI 🧠 " + regime_status(self.history_nums)
+                txt = regime_status(self.history_nums)
+                if getattr(self, 'entry_policy', None):
+                    kind = _regime(self.history_nums)[1]
+                    txt = ("[ENTER] " if kind in self.entry_policy
+                           else "[SKIP] ") + txt
+                return "AI 🧠 " + txt
             except Exception:
                 pass
         try:
@@ -6043,6 +6639,7 @@ class LinupApp:
                 for _ in range(n_cats)
             ]
             self.sug_row.update()
+            self._refresh_ai_label()   # keep "watching N/6" counting up
             return
 
         def _sug_content(label):
