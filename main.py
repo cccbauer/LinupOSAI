@@ -256,7 +256,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.2-AI"
+        self.page.title      = "Linup v19.1.3-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -718,6 +718,7 @@ class LinupApp:
         self.val_fout             = 0.30
         self.nombre_mesa          = "TABLE 1"
         self.session_id           = None
+        self.play_session_id      = None   # unique per play session (bet log)
         self.inv_name             = ""
         self.inv_capital          = 0.0
         self.chip_usd_rate        = 0.0   # USD per chip (CHIPS investments)
@@ -847,7 +848,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.2-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.3-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -4292,6 +4293,12 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def iniciar_ciclo(self, e=None):
         try:
+            # Fresh id for THIS play session so the bet log can separate sessions
+            # (session_id is only assigned later, when the session is saved).
+            try:
+                self.play_session_id = datetime.now().strftime('%Y%m%d-%H%M%S')
+            except Exception:
+                self.play_session_id = str(len(getattr(self, 'history_nums', [])))
             self.nombre_mesa   = str(self.table_input.value).upper() or "TABLE 1"
             self.banca_inicial = float(self.banca_input.value or 100)
             self.banca_actual  = self.banca_inicial
@@ -5455,7 +5462,8 @@ class LinupApp:
         rec = {
             'ts': ts,
             'table': str(getattr(self, 'nombre_mesa', '')),
-            'session': getattr(self, 'session_id', None),
+            'session': (getattr(self, 'play_session_id', None)
+                        or getattr(self, 'session_id', None)),
             'spin': len(hist),
             'num': int(num),
             'live': bool(getattr(self, 'live_table_mode', False)),
