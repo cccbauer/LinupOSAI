@@ -126,6 +126,110 @@ DOZEN_SECTOR_AFFINITY = {
     for _d in ('1a', '2a', '3a')
 }
 
+# ── Dozen-CONDITIONED colour picker (COND) ───────────────────────────────────
+# Colour the live dozen suggestion by which colour-half of the SUGGESTED dozen
+# has been landing more over the recent window — committing only when the lean
+# clears a margin, else staying dozen-only. This beats reading the raw B/R
+# stream (the old PatternDetector overlay) because the exploitable edge is a
+# joint dozen×colour property, not a property of the colour sequence alone.
+# Validated per-dealer in ai_combo_eval.py (net-chip terms under the 1/3/5
+# progression). The window is a live sliding read, so it self-adapts every
+# session; re-tune the two constants as more sessions are logged with:
+#     python3 ai_combo_eval.py --sweep ~/linup_data/croupier_log.txt
+COND_WINDOW = 12     # recent spins considered
+COND_MARGIN = 0.15   # |frac_red_in_dozen - 0.5| must exceed this to commit
+COND_MIN    = 4      # need at least this many in-dozen landings for a read
+
+
+def cond_color_for(dozen, history):
+    """'R' / 'B' / None — the colour to append to a live dozen suggestion.
+
+    Looks only at spins that landed in `dozen`'s live colour groups over the
+    recent window; returns None (stay dozen-only) unless one colour clears the
+    margin. Reuses GRUPOS_MAESTROS so the covered numbers never drift from the
+    bet the app actually places (incl. the 0 folded into 3a groups)."""
+    reds = GRUPOS_MAESTROS.get(f'{dozen}_LR', ())
+    blacks = GRUPOS_MAESTROS.get(f'{dozen}_LB', ())
+    recent = history[-COND_WINDOW:] if history else []
+    r = sum(1 for n in recent if n in reds)
+    b = sum(1 for n in recent if n in blacks)
+    tot = r + b
+    if tot < COND_MIN:
+        return None
+    frac = r / tot
+    if frac >= 0.5 + COND_MARGIN:
+        return 'R'
+    if frac <= 0.5 - COND_MARGIN:
+        return 'B'
+    return None
+
+
+# ── RHYTHM-vs-STREAK-vs-BIAS colour picker (RVS) — the deployed overlay ───────
+# Classifies the croupier's recent colour regime and rides / flips accordingly:
+#   BIAS   (>=65% one colour in window)      -> ride the dominant colour
+#   STREAK (current run >= RIDE_LEN, or high P(repeat)) -> ride the run
+#   RHYTHM (short runs, low P(repeat))                  -> flip (a break is due)
+#   else                                                -> no colour (dozen only)
+# Replaced COND as the overlay: under the real 1x-2x-3x combo (chip-in)
+# progression and the player's 2% max-loss cap, RVS is the best risk-adjusted
+# colour picker we have — it covers ~14 numbers (max loss ~1.3% of bank) vs the
+# bare dozen's ~28 (~1.8%), so the combo can be sized up within the 2% budget.
+# Encodes the operator's own read (bias / streak / rhythm). PROVISIONAL: tuned
+# in-sample on ~13 dealers; re-validate held-out as sessions accrue via
+#     python3 ai_combo_eval.py --sweep-rvs ~/linup_data/croupier_log.txt
+RVS_WINDOW, RVS_STREAK_THR, RVS_RHYTHM_THR = 12, 0.60, 0.40
+RVS_MIN, RVS_RHYTHM_RUN, RVS_RIDE_LEN, RVS_BIAS_MARGIN = 6, 2, 4, 0.15
+
+
+def _regime(history):
+    """Classify the recent colour regime. Returns (pred_bit|None, kind, detail):
+    kind in 'watching' / 'BIAS' / 'STREAK' / 'RHYTHM' / 'none'."""
+    cols = [1 if n in ROJOS else 0 for n in history if n != 0][-RVS_WINDOW:]
+    if len(cols) < RVS_MIN:
+        return (None, 'watching', {'n': len(cols)})
+    reps = sum(cols[i] == cols[i - 1] for i in range(1, len(cols)))
+    prep = reps / (len(cols) - 1)
+    frac_red = sum(cols) / len(cols)
+    last = cols[-1]
+    run = 1
+    for i in range(len(cols) - 2, -1, -1):
+        if cols[i] == last:
+            run += 1
+        else:
+            break
+    if abs(frac_red - 0.5) >= RVS_BIAS_MARGIN:          # BIAS: ride dominant
+        return (1 if frac_red > 0.5 else 0, 'BIAS', {'frac': frac_red})
+    if run >= RVS_RIDE_LEN:                             # STREAK now: ride run
+        return (last, 'STREAK', {'run': run})
+    if prep >= RVS_STREAK_THR and run >= 2:             # streaky: ride
+        return (last, 'STREAK', {'run': run})
+    if prep <= RVS_RHYTHM_THR and run >= RVS_RHYTHM_RUN:  # rhythmic: flip
+        return (1 - last, 'RHYTHM', {'run': run})
+    return (None, 'none', {'prep': prep, 'frac': frac_red})
+
+
+def regime_color(history):
+    """'R' / 'B' / None — colour to append to the live dozen suggestion."""
+    pred, _, _ = _regime(history)
+    if pred is None:
+        return None
+    return 'R' if pred == 1 else 'B'
+
+
+def regime_status(history):
+    """Human-readable one-liner for the AI bar, reflecting the RVS overlay."""
+    pred, kind, d = _regime(history)
+    col = 'R' if pred == 1 else ('B' if pred == 0 else None)
+    if kind == 'watching':
+        return f"watching… {d['n']}/{RVS_MIN} colours"
+    if kind == 'BIAS':
+        return f"BIAS {int(round(max(d['frac'], 1 - d['frac']) * 100))}% → bet {col}"
+    if kind == 'STREAK':
+        return f"STREAK ×{d['run']} → ride {col}"
+    if kind == 'RHYTHM':
+        return f"RHYTHM → flip {col}"
+    return "no clear regime — dozen only"
+
 
 class LinupApp:
     def __init__(self, page: ft.Page):
@@ -143,7 +247,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.2.0-AI"
+        self.page.title      = "Linup v19.0.0-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -726,7 +830,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v18.2.0-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.0.0-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -3931,7 +4035,7 @@ class LinupApp:
         # ── AI combination-coach bar ──────────────────────────────────────
         self.lbl_ai_info = ft.Text(
             self._get_ai_info_display(),
-            color='#9b59b6', weight=ft.FontWeight.BOLD, size=10,
+            color='#f1c40f', weight=ft.FontWeight.BOLD, size=16,
             text_align=ft.TextAlign.CENTER, no_wrap=False,
         )
         ai_bar = ft.Container(
@@ -4572,6 +4676,7 @@ class LinupApp:
                 pass
 
             num = int(e.control.data)
+            _acted, _bet_groups, _is_win, _cost = False, [], None, 0.0
             if self.activa:
                 n                     = len(self.grupos_activos)
                 is_simple_outside     = self._is_simple_outside_bet()
@@ -4615,6 +4720,8 @@ class LinupApp:
                                 self.nivel_martingala_out += 1
                             else:
                                 self.nivel_martingala_in += 1
+                _acted, _bet_groups, _is_win, _cost = (
+                    True, list(self.grupos_activos), is_win, total_cost)
                 self.activa         = False
                 self.grupos_activos = []
                 self.limpiar_seleccion_visual()
@@ -4664,6 +4771,15 @@ class LinupApp:
                     except Exception:
                         pass
 
+            # Real-bet logging: record the AI suggestion the player saw, their
+            # actual entry decision (enter/pass), and the outcome — the dataset
+            # for learning WHEN the player enters. Uses history BEFORE this spin
+            # is appended, matching what was on screen at decision time.
+            try:
+                self._log_real_bet(num, _acted, _bet_groups, _is_win, _cost)
+            except Exception:
+                pass
+
             self.history_nums.append(num)
             self.sliding_window.append(num)
             if getattr(self, 'ai_ok', False):
@@ -4687,6 +4803,68 @@ class LinupApp:
             with open("/tmp/linup_error.log", "a") as _f:
                 _f.write(f"[process_number] {type(_err).__name__}: {_err}\n")
                 traceback.print_exc(file=_f)
+
+    def _current_suggestion(self):
+        """The live dozen+colour the app is suggesting right now, as (dozen,
+        colour) — reproduces what the player sees before entering. Uses the
+        pre-spin sliding window (sector affinity) + the RVS colour regime."""
+        try:
+            sw = list(self.sliding_window)
+            if len(sw) < 6:
+                return (None, None)
+            def _sc(g):
+                return sum(DOZEN_SECTOR_AFFINITY[g].get(SECTOR_OF.get(n), 0.0)
+                           for n in sw) / 6.0
+            stats = sorted(((_sc(g), g) for g in ('1a', '2a', '3a')), reverse=True)
+            if stats[0][0] <= 0 or abs(stats[0][0] - stats[1][0]) < 1e-9:
+                return (None, None)   # no data / WAIT tie
+            return (stats[0][1], regime_color(self.history_nums))
+        except Exception:
+            return (None, None)
+
+    def _log_real_bet(self, num, acted, bet_groups, is_win, cost):
+        """Append one per-spin JSONL record: the AI suggestion, the player's
+        entry decision, and the outcome. Best-effort; never blocks a spin."""
+        if not getattr(self, 'db_path', None):
+            return
+        import json
+        hist = list(self.history_nums)      # BEFORE this spin is appended
+        pred, kind, d = _regime(hist)
+        sug_dozen, sug_color = self._current_suggestion()
+        sug_combo = f'{sug_dozen}{_DOC_SFX.get(sug_color, "_L")}' if sug_dozen else None
+        disp = [self._to_display_name(g) for g in bet_groups]
+        try:
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            ts = ''
+        rec = {
+            'ts': ts,
+            'table': str(getattr(self, 'nombre_mesa', '')),
+            'session': getattr(self, 'session_id', None),
+            'spin': len(hist),
+            'num': int(num),
+            'live': bool(getattr(self, 'live_table_mode', False)),
+            'acted': bool(acted),
+            'bet': disp,
+            'followed_suggestion': bool(sug_dozen and sug_dozen in disp),
+            'suggested': {'dozen': sug_dozen, 'color': sug_color, 'combo': sug_combo},
+            'regime': {
+                'kind': kind,
+                'color': 'R' if pred == 1 else ('B' if pred == 0 else None),
+                'run': d.get('run'),
+                'frac_red': round(d['frac'], 3) if d.get('frac') is not None else None,
+                'prep': round(d['prep'], 3) if d.get('prep') is not None else None,
+                'n': d.get('n'),
+            },
+            'is_win': is_win,
+            'delta': round(float(getattr(self, 'last_bank_delta', 0.0)), 3),
+            'cost': round(float(cost), 3),
+            'bank_after': round(float(getattr(self, 'banca_actual', 0.0)), 2),
+            'spins_since_entry': getattr(self, 'spins_since_entry', None),
+        }
+        path = os.path.join(os.path.dirname(self.db_path), 'bet_log.jsonl')
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec) + '\n')
 
     @staticmethod
     def _to_display_name(g):
@@ -5766,10 +5944,11 @@ class LinupApp:
         """One-line coach text: learning progress, live bet grade, or a tip."""
         if not getattr(self, 'ai_ok', False):
             return "AI: off"
-        # In live table mode the colour-pattern read is the headline.
-        if getattr(self, 'live_table_mode', False) and getattr(self, 'pattern_model', None):
+        # In live table mode the RVS colour-regime read is the headline —
+        # this is the overlay that actually colours the dozen suggestion.
+        if getattr(self, 'live_table_mode', False):
             try:
-                return "AI 🧠 " + self.pattern_model.status_text()
+                return "AI 🧠 " + regime_status(self.history_nums)
             except Exception:
                 pass
         try:
@@ -5915,13 +6094,16 @@ class LinupApp:
                     click = None
                 else:
                     top = stats[0]['g']
-                    # AI pattern: when no manual filter is set, colour the dozen
-                    # with the croupier's committed colour pattern (e.g. 2a -> 2a+R).
+                    # AI colour overlay: when no manual filter is set, colour the
+                    # dozen with the croupier's current colour regime (RVS:
+                    # bias / streak / rhythm — see regime_color). Best risk-adjusted
+                    # picker under the 1x-2x-3x combo progression + 2% cap
+                    # (ai_combo_eval.py). cond_color_for(top, self.history_nums) is
+                    # the retired COND fallback, kept for A/B comparison.
                     rcol = None
-                    if lf is None and getattr(self, 'ai_ok', False) \
-                            and getattr(self, 'pattern_model', None):
+                    if lf is None and getattr(self, 'ai_ok', False):
                         try:
-                            rcol = self.pattern_model.predict_color()
+                            rcol = regime_color(self.history_nums)
                         except Exception:
                             rcol = None
                     eff_filter = lf if lf is not None else rcol
