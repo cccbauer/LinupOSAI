@@ -256,7 +256,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.0-AI"
+        self.page.title      = "Linup v19.1.1-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -847,7 +847,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.0-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.1-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -2418,7 +2418,10 @@ class LinupApp:
         train = [r for r in acted if r.get('session') in train_s]
         test = [r for r in acted if r.get('session') not in train_s]
         if not train or not test:
-            return {'ok': False, 'reason': 'need entries from ≥2 sessions'}
+            return {'ok': False,
+                    'reason': f'need entries from ≥2 sessions — have {len(acted)} '
+                              f'entr{"y" if len(acted) == 1 else "ies"} in '
+                              f'{len(sess)} session{"" if len(sess) == 1 else "s"}'}
 
         def roi(rs):
             c = sum(r.get('cost', 0) or 0 for r in rs)
@@ -2438,6 +2441,50 @@ class LinupApp:
                 'test_all_roi': test_all, 'test_policy_roi': test_pol,
                 'improvement': test_pol - test_all,
                 'n_train': len(train), 'n_test': len(test)}
+
+    def _roi_bars(self, items):
+        """items: [(label, value_float)] -> a horizontal bar chart Container.
+        Bars grow right (green, +) / left (red, −) from a centre zero line; the
+        numeric value is baked into each label so nothing overflows."""
+        import flet.canvas as cv
+        import inspect
+        _tv = ('value' if 'value' in inspect.signature(cv.Text.__init__).parameters
+               else 'text')
+
+        def _t(x, y, s, color='#dddddd', size=11):
+            return cv.Text(x=x, y=y, style=ft.TextStyle(color=color, size=size),
+                           **{_tv: str(s)})
+
+        items = list(items)
+        row_h, top, label_w = 24, 6, 150
+        H = top * 2 + max(len(items), 1) * row_h
+
+        def build(cw):
+            shapes = []
+            if not items:
+                return shapes
+            bw = max(30, cw - label_w - 6)
+            cx = label_w + bw / 2
+            maxabs = max((abs(v) for _, v in items), default=1) or 1
+            shapes.append(cv.Line(x1=cx, y1=top, x2=cx, y2=top + len(items) * row_h,
+                                  paint=ft.Paint(color='#555555', stroke_width=1)))
+            for i, (label, v) in enumerate(items):
+                cy = top + i * row_h + row_h / 2
+                length = (abs(v) / maxabs) * (bw / 2 - 4)
+                color = '#2ecc71' if v >= 0 else '#e74c3c'
+                rx = cx if v >= 0 else cx - length
+                shapes.append(cv.Rect(x=rx, y=cy - 7, width=max(length, 1), height=14,
+                                      paint=ft.Paint(color=color,
+                                                     style=ft.PaintingStyle.FILL)))
+                shapes.append(_t(2, cy - 7, str(label)[:26]))
+            return shapes
+
+        canvas = cv.Canvas(
+            shapes=[], expand=True, height=H, resize_interval=0,
+            on_resize=lambda e: (setattr(canvas, 'shapes', build(e.width))
+                                 or canvas.update()))
+        return ft.Container(bgcolor='#0d0d0d', border_radius=8, padding=4,
+                            content=canvas, height=H)
 
     def show_bet_eval_view(self, investment_id: int = None):
         """AI Bet Eval page — how the player's real entry decisions performed
@@ -2487,18 +2534,6 @@ class LinupApp:
         def line(t, c='#dddddd'):
             rows.append(ft.Text(t, color=c, size=13))
 
-        def stat_row(label, b):
-            if not b['entries']:
-                line(f"{label}: (none)")
-                return
-            c = '#2ecc71' if b['roi'] >= 0 else '#ff5555'
-            rows.append(ft.Row(spacing=4, controls=[
-                ft.Text(label, color='#dddddd', size=13, width=110),
-                ft.Text(f"{b['entries']} bets", color='#aaaaaa', size=12, width=68),
-                ft.Text(f"win {pct(b['win'])}", color='#aaaaaa', size=12, width=68),
-                ft.Text(f"ROI {b['roi']:+.1f}%", color=c, size=13),
-            ]))
-
         if s.get('empty'):
             line("No bets logged yet.", '#f1c40f')
             line("Play some sessions — every spin is logged — then reopen this page.")
@@ -2521,40 +2556,36 @@ class LinupApp:
                 size=18, weight=ft.FontWeight.BOLD))
             rows.append(ft.Divider(color='#333'))
 
-            hdr("By regime (entries only)")
+            hdr("By regime (entries only)  — bar = ROI")
             if not s['regimes']:
                 line("(no entries yet)")
-            for rr in s['regimes']:
-                stat_row(str(rr['kind']), rr)
+            else:
+                rows.append(self._roi_bars(
+                    [(f"{rr['kind']} {rr['roi']:+.0f}% ({rr['entries']}b)", rr['roi'])
+                     for rr in s['regimes']]))
             rows.append(ft.Divider(color='#333'))
 
             hdr("Following the suggested dozen vs freelancing")
-            stat_row("Followed", s['followed'])
-            stat_row("Freelanced", s['freelanced'])
+            fb = [(f"{lbl_} {b['roi']:+.0f}% ({b['entries']}b)", b['roi'])
+                  for lbl_, b in (("Followed", s['followed']),
+                                  ("Freelanced", s['freelanced'])) if b['entries']]
+            if fb:
+                rows.append(self._roi_bars(fb))
+            else:
+                line("(no entries yet)")
             rows.append(ft.Divider(color='#333'))
 
-            hdr("Suggestion scoreboard — every option (hit within 3)")
-            _CAT_NAME = {'docs': 'Dozen (+colour)', 'cols': 'Columns',
+            hdr("Suggestion scoreboard — every option (bar = ROI)")
+            _CAT_NAME = {'docs': 'Dozen+col', 'cols': 'Columns',
                          'secs': 'Sectors', 'thirds': 'Thirds', 'wave': 'Waves'}
             if not s.get('scoreboard'):
                 line("Needs spins logged with v19.0.1+ (all on-screen "
                      "suggestions). Play more and reopen.", '#f1c40f')
             else:
-                rows.append(ft.Row(spacing=4, controls=[
-                    ft.Text("option", color='#888', size=11, width=130),
-                    ft.Text("bets", color='#888', size=11, width=52),
-                    ft.Text("hit≤3", color='#888', size=11, width=58),
-                    ft.Text("ROI", color='#888', size=11),
-                ]))
-                for sc in s['scoreboard']:
-                    c = '#2ecc71' if sc['roi'] >= 0 else '#ff5555'
-                    rows.append(ft.Row(spacing=4, controls=[
-                        ft.Text(_CAT_NAME.get(sc['cat'], sc['cat']),
-                                color='#dddddd', size=13, width=130),
-                        ft.Text(f"{sc['entries']}", color='#aaaaaa', size=12, width=52),
-                        ft.Text(f"{sc['hitrate']:.0f}%", color='#aaaaaa', size=12, width=58),
-                        ft.Text(f"{sc['roi']:+.1f}%", color=c, size=13),
-                    ]))
+                rows.append(self._roi_bars(
+                    [(f"{_CAT_NAME.get(sc['cat'], sc['cat'])} {sc['roi']:+.0f}% "
+                      f"({sc['hitrate']:.0f}% hit)", sc['roi'])
+                     for sc in s['scoreboard']]))
             rows.append(ft.Container(height=6))
             line("Realized play (what you actually bet), not the every-spin "
                  "backtest. The scoreboard is counterfactual — how each option "
@@ -2596,15 +2627,11 @@ class LinupApp:
             line(pol.get('reason', '—'), '#f1c40f')
         else:
             line(f"Fit on {pol['n_train']} entries, tested on {pol['n_test']} "
-                 f"held-out.")
-            for k, (nk, rk) in sorted(pol['train_bykind'].items(),
-                                      key=lambda kv: -kv[1][1]):
-                cc = '#2ecc71' if rk >= 0 else '#ff5555'
-                rows.append(ft.Row(spacing=4, controls=[
-                    ft.Text(str(k), color='#dddddd', size=13, width=90),
-                    ft.Text(f"{nk} bets", color='#aaaaaa', size=12, width=70),
-                    ft.Text(f"{rk:+.1f}%", color=cc, size=13),
-                ]))
+                 f"held-out.  (bar = ROI per regime, train)")
+            rows.append(self._roi_bars(
+                [(f"{k} {rk:+.0f}% ({nk}b)", rk)
+                 for k, (nk, rk) in sorted(pol['train_bykind'].items(),
+                                           key=lambda kv: -kv[1][1])]))
             line(f"Recommend entering only: "
                  f"{', '.join(pol['policy']) if pol['policy'] else '(none)'}")
             cc = '#2ecc71' if pol['improvement'] >= 0 else '#ff5555'
