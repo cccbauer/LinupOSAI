@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.6-AI"
+        self.page.title      = "Linup v19.1.7-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -858,7 +858,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.6-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.7-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -5452,8 +5452,8 @@ class LinupApp:
             multi_in = self._current_multi(is_out=False)
 
             if self.sniper_mode:
-                intersection = self._compute_intersection()
-                num_chips = len(intersection) if intersection else 1
+                intersection, weights = self._compute_intersection(with_weights=True)
+                num_chips = sum(weights.values()) if weights else 1
                 if self.prog_on:
                     multi_in = self._sniper_inside_multi(num_chips)
                 total = self.val_fin * num_chips * multi_in
@@ -5795,21 +5795,28 @@ class LinupApp:
             levels[num] = count
         return levels
 
-    def _compute_intersection(self):
+    def _compute_intersection(self, with_weights=False):
         """Sniper mode: smart intersection across group types, union within types.
-        
+
         Examples:
         - Z0 + ZG (both sectors): UNION of sectors
         - Z0 + ZG + R (sectors + color): (Z0 ∪ ZG) ∩ R
         - Z0 + ZG + 1a + Even: (Z0 ∪ ZG) ∩ (1a) ∩ (Even)
         - 1a + 2a + R: (1a ∪ 2a) ∩ R
+
+        with_weights=True also returns a {num: chip_weight} dict — a number
+        covered by more than one zone WITHIN the same type (e.g. two
+        overlapping Live-Sessions sector zones) stacks chips instead of
+        collapsing to one, mirroring how non-sniper safety levels already
+        count multiplicity. Other types (dozens, columns, waves, thirds)
+        always partition cleanly, so their weight is always 1.
         """
         active_groups = [self._live_norm(g) for g in self.grupos_activos]
         active_groups = [g for g in active_groups
                         if g in GRUPOS_MAESTROS]
         if not active_groups:
-            return set()
-        
+            return (set(), {}) if with_weights else set()
+
         # Categorize groups by type
         def get_group_type(g):
             if g in {'Z0', 'ZG', 'ZP', 'H'}:
@@ -5830,7 +5837,7 @@ class LinupApp:
                 return 'RANGE'
             else:
                 return 'FILTER'
-        
+
         # Group by type
         by_type = {}
         for g in active_groups:
@@ -5838,15 +5845,21 @@ class LinupApp:
             if gtype not in by_type:
                 by_type[gtype] = []
             by_type[gtype].append(g)
-        
-        # Compute union for each type
+
+        # Compute union (and per-number multiplicity) for each type
         type_unions = {}
+        type_weights = {}
         for gtype, groups in by_type.items():
             union = set()
+            weight = {}
             for g in groups:
-                union |= self._grupo_set(g)
+                s = self._grupo_set(g)
+                union |= s
+                for num in s:
+                    weight[num] = weight.get(num, 0) + 1
             type_unions[gtype] = union
-        
+            type_weights[gtype] = weight
+
         # Intersect across types
         result = None
         for gtype, union_set in type_unions.items():
@@ -5867,7 +5880,12 @@ class LinupApp:
                 and all(0 in u for u in present_base)):
             result.add(0)
 
-        return result if result is not None else set()
+        result = result if result is not None else set()
+        if not with_weights:
+            return result
+        weights = {n: max((tw.get(n, 1) for tw in type_weights.values()), default=1)
+                   for n in result}
+        return result, weights
 
     def seleccionar_mixer(self, e):
         g = e.control.data['name']
@@ -6271,12 +6289,9 @@ class LinupApp:
     
     def _show_inside_bet_popup(self, on_ready_cb):
         """Show popup with roulette grid and outside betting table for inside bets."""
-        intersection = self._compute_intersection()
-
         if self.sniper_mode:
-            all_nums    = intersection
-            safety_levels = {n: 1 for n in all_nums}
-            total_chips = len(all_nums)
+            all_nums, safety_levels = self._compute_intersection(with_weights=True)
+            total_chips = sum(safety_levels.values())
         else:
             all_nums: set = set()
             for g in self.grupos_activos:
