@@ -1,6 +1,6 @@
 [project]
 name = "LinupOSAI"
-version = "19.1.5-AI"
+version = "19.1.6-AI"
 description = "Linup Roulette Tracker - AI Edition"
 requires-python = ">=3.10"
 dependencies = ["flet==0.80.5", "reportlab>=4.0.0"]
