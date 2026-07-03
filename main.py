@@ -51,6 +51,15 @@ GRUPOS_MAESTROS = {
     '1-18': set(range(1, 19)),
     '19-36': set(range(19, 37)),
 }
+# Live Sessions mode: Z0/ZG/ZP/H sector zones widened with explicit wheel-
+# neighbour numbers (real-money bet coverage only — the base Z0/ZG/ZP/H above
+# stay an untouched partition for SECTOR_OF / DOZEN_SECTOR_AFFINITY below).
+GRUPOS_SECTOR_LS = {
+    'Z0': GRUPOS_MAESTROS['Z0'] | {19, 28},
+    'ZG': GRUPOS_MAESTROS['ZG'] | {12, 15, 9, 17},
+    'ZP': GRUPOS_MAESTROS['ZP'] | {1, 6},
+    'H':  GRUPOS_MAESTROS['H']  | {27, 33, 22, 25},
+}
 PROG_FIBO = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
 C_COL, C_DOC, C_SEC, C_SET, C_WAV = '#00d2ff', '#2ecc71', '#e67e22', '#9b59b6', '#e91e63'
 C_FLT_R, C_FLT_B, C_FLT_E, C_FLT_O, C_FLT_18, C_FLT_36 = '#c0392b', '#222222', '#446644', '#664444', '#555577', '#445566'
@@ -701,6 +710,7 @@ class LinupApp:
         self.activa               = False
         self.free_spin_mode       = False
         self.live_table_mode      = False
+        self.live_sessions_mode   = False
         self.live_filter          = None   # None, 'R', 'B'
         self.prog_on              = True   # progression on/off
         self.sniper_mode          = True   # sniper mode on/off (intersection of groups) - default ON
@@ -4362,6 +4372,13 @@ class LinupApp:
             if on and hasattr(self, 'cb_basic'):
                 self.cb_basic.value = True
                 self.cb_basic.update()
+            if on and getattr(self, 'live_sessions_mode', False):
+                self.live_sessions_mode = False
+                _ls_lbl.value    = "LIVE SESSIONS: OFF"
+                _ls_ref[0].style = ft.ButtonStyle(bgcolor='#555555',
+                                                  color=ft.Colors.WHITE)
+                _ls_lbl.update()
+                _ls_ref[0].update()
             _lt_lbl.update()
             _lt_ref[0].update()
 
@@ -4372,6 +4389,38 @@ class LinupApp:
             on_click=_toggle_live_table,
         )
         _lt_ref[0] = live_table_btn
+
+        self.live_sessions_mode = False
+        _ls_lbl = ft.Text("LIVE SESSIONS: OFF", color=ft.Colors.WHITE,
+                          weight=ft.FontWeight.BOLD)
+        _ls_ref = [None]
+
+        def _toggle_live_sessions(e):
+            self.live_sessions_mode = not self.live_sessions_mode
+            on = self.live_sessions_mode
+            _ls_lbl.value    = "LIVE SESSIONS: ON" if on else "LIVE SESSIONS: OFF"
+            _ls_ref[0].style = ft.ButtonStyle(
+                bgcolor='#8e44ad' if on else '#555555',
+                color=ft.Colors.WHITE,
+            )
+            if on and self.live_table_mode:
+                # Live Sessions runs on the Live Table = OFF setup.
+                self.live_table_mode = False
+                _lt_lbl.value    = "LIVE TABLE: OFF"
+                _lt_ref[0].style = ft.ButtonStyle(bgcolor='#555555',
+                                                  color=ft.Colors.WHITE)
+                _lt_lbl.update()
+                _lt_ref[0].update()
+            _ls_lbl.update()
+            _ls_ref[0].update()
+
+        live_sessions_btn = ft.ElevatedButton(
+            content=_ls_lbl,
+            height=50, expand=True,
+            style=ft.ButtonStyle(bgcolor='#555555', color=ft.Colors.WHITE),
+            on_click=_toggle_live_sessions,
+        )
+        _ls_ref[0] = live_sessions_btn
 
         vc = self.visible_cats
         self.cb_basic  = ft.Checkbox(label="Basic  (R N P I B A)", value=vc['basic'],
@@ -4434,6 +4483,8 @@ class LinupApp:
                         free_spin_btn,
                         ft.Container(height=6),
                         live_table_btn,
+                        ft.Container(height=6),
+                        live_sessions_btn,
                         ft.Container(height=10),
                         ft.Text("TABLE COLUMNS:", color='#7f8c8d', size=12,
                                 weight=ft.FontWeight.BOLD),
@@ -5296,9 +5347,16 @@ class LinupApp:
         # Simple outside: only ONE type, and max 2 groups of that type
         return types_used == 1 and n <= 2
 
+    def _grupo_set(self, g):
+        """Numbers covered by group g for bet cost / win-check — swaps in the
+        wheel-neighbour-widened Z0/ZG/ZP/H when Live Sessions mode is on."""
+        if getattr(self, 'live_sessions_mode', False) and g in GRUPOS_SECTOR_LS:
+            return GRUPOS_SECTOR_LS[g]
+        return GRUPOS_MAESTROS.get(g, set())
+
     def _group_cost(self, g):
         if g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE:
-            return self.val_fin * len(GRUPOS_MAESTROS[g])
+            return self.val_fin * len(self._grupo_set(g))
         return self.val_fout
 
     def _progression_for_N(self, N: int) -> list:
@@ -5434,7 +5492,7 @@ class LinupApp:
                     intersection = self._compute_intersection()
                     is_win = num in intersection
                 else:
-                    is_win = any(num in GRUPOS_MAESTROS[g] for g in self.grupos_activos)
+                    is_win = any(num in self._grupo_set(g) for g in self.grupos_activos)
 
                 if is_win:
                     self.banca_actual += win_py
@@ -5733,7 +5791,7 @@ class LinupApp:
         active_groups = [g for g in active_groups
                         if g in GRUPOS_MAESTROS]  # make sure group exists
         for num in range(0, 37):
-            count = sum(1 for g in active_groups if num in GRUPOS_MAESTROS[g])
+            count = sum(1 for g in active_groups if num in self._grupo_set(g))
             levels[num] = count
         return levels
 
@@ -5786,7 +5844,7 @@ class LinupApp:
         for gtype, groups in by_type.items():
             union = set()
             for g in groups:
-                union |= GRUPOS_MAESTROS[g]
+                union |= self._grupo_set(g)
             type_unions[gtype] = union
         
         # Intersect across types
@@ -6224,7 +6282,7 @@ class LinupApp:
             for g in self.grupos_activos:
                 g = self._live_norm(g)
                 if g in GRUPOS_MAESTROS:
-                    all_nums |= GRUPOS_MAESTROS[g]
+                    all_nums |= self._grupo_set(g)
             safety_levels = self._compute_safety_levels()
             total_chips = sum(v for v in safety_levels.values() if v > 0)
             max_safety = max((v for v in safety_levels.values() if v > 0), default=0)
