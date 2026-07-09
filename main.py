@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.7-AI"
+        self.page.title      = "Linup v19.1.8-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -858,7 +858,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.7-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.8-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -5488,13 +5488,20 @@ class LinupApp:
 
                 # Sniper mode: check intersection only; regular mode: check if in any group
                 is_win = False
+                chip_weight = 1   # how many stacked chips actually sit on `num`
                 if self.sniper_mode and not is_simple_outside:
-                    intersection = self._compute_intersection()
+                    intersection, weights = self._compute_intersection(with_weights=True)
                     is_win = num in intersection
+                    chip_weight = weights.get(num, 1)
                 else:
                     is_win = any(num in self._grupo_set(g) for g in self.grupos_activos)
+                    if is_win and not is_simple_outside:
+                        chip_weight = self._compute_safety_levels().get(num, 1)
 
                 if is_win:
+                    win_py = win_py * chip_weight   # pay for every stacked chip on `num`,
+                                                     # not just one (overlapping zones — e.g.
+                                                     # Live Sessions ZP+H sharing a number)
                     self.banca_actual += win_py
                     self.last_bank_delta = win_py - total_cost
                     # Only reset progression counters when progression is active
