@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.10-AI"
+        self.page.title      = "Linup v19.1.11-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -858,7 +858,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.10-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.11-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -5228,7 +5228,7 @@ class LinupApp:
         self.reg_header_row.controls = [
             ft.Text(h, width=cw, color=c,
                     text_align=ft.TextAlign.CENTER,
-                    size=7, weight=ft.FontWeight.BOLD)
+                    size=9, weight=ft.FontWeight.BOLD)
             for h, c in specs
         ]
 
@@ -5271,7 +5271,7 @@ class LinupApp:
                     controls=[
                         ft.Text(txt, width=cw, color=col,
                                 text_align=ft.TextAlign.CENTER,
-                                size=8, weight=ft.FontWeight.BOLD)
+                                size=10, weight=ft.FontWeight.BOLD)
                         for txt, col in cells
                     ],
                     spacing=0,
@@ -5478,6 +5478,9 @@ class LinupApp:
 
             num = int(e.control.data)
             _acted, _bet_groups, _is_win, _cost = False, [], None, 0.0
+            _wait_snapshot = self.spins_since_entry   # captured before any
+                                                       # reset below so the log
+                                                       # reflects the real wait
             if self.activa:
                 n                     = len(self.grupos_activos)
                 is_simple_outside     = self._is_simple_outside_bet()
@@ -5584,7 +5587,8 @@ class LinupApp:
             # for learning WHEN the player enters. Uses history BEFORE this spin
             # is appended, matching what was on screen at decision time.
             try:
-                self._log_real_bet(num, _acted, _bet_groups, _is_win, _cost)
+                self._log_real_bet(num, _acted, _bet_groups, _is_win, _cost,
+                                   _wait_snapshot)
             except Exception:
                 pass
 
@@ -5676,7 +5680,7 @@ class LinupApp:
             pass
         return out
 
-    def _log_real_bet(self, num, acted, bet_groups, is_win, cost):
+    def _log_real_bet(self, num, acted, bet_groups, is_win, cost, wait_before=None):
         """Append one per-spin JSONL record: the AI suggestion, the player's
         entry decision, and the outcome. Best-effort; never blocks a spin."""
         if not getattr(self, 'db_path', None):
@@ -5716,7 +5720,8 @@ class LinupApp:
             'delta': round(float(getattr(self, 'last_bank_delta', 0.0)), 3),
             'cost': round(float(cost), 3),
             'bank_after': round(float(getattr(self, 'banca_actual', 0.0)), 2),
-            'spins_since_entry': getattr(self, 'spins_since_entry', None),
+            'spins_since_entry': (wait_before if wait_before is not None
+                                  else getattr(self, 'spins_since_entry', None)),
         }
         path = os.path.join(os.path.dirname(self.db_path), 'bet_log.jsonl')
         with open(path, 'a', encoding='utf-8') as f:
