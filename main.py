@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.11-AI"
+        self.page.title      = "Linup v19.1.12-AI"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -858,7 +858,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.11-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.12-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -2461,6 +2461,78 @@ class LinupApp:
                 'confident': (len(test) >= confident_test
                               and min_kind_n >= confident_kind)}
 
+    # AI-learned tables (StrategyModel + DecisionTracker) — NOT the core
+    # financial tables (sesiones, investments, ...), which must never be
+    # touched by a "clear AI memory" action.
+    _AI_DB_TABLES = ('strategy_combo_stats', 'strategy_feature_stats',
+                     'strategy_setup_stats', 'strategy_wait',
+                     'decisions', 'decision_feedback', 'learned_patterns')
+    _AI_FLAT_FILES = ('bet_log.jsonl', 'entry_policy.json', 'rvs_config.json',
+                      'croupier_log.txt')
+
+    def _stash_and_clear_ai_memory(self):
+        """Back up every AI-learned artifact (the 7 strategy/decision-tracker
+        DB tables + bet_log/entry_policy/rvs_config/croupier_log files) to a
+        timestamped folder under ~/linup_data/stash/, then wipe the live
+        copies and re-init the AI so the running app reflects it immediately.
+        Core financial tables (sessions, investments, ...) are never touched.
+        Returns the stash dir path, or None on failure (nothing is cleared
+        if the backup step fails)."""
+        import json
+        if not getattr(self, 'db_path', None):
+            return None
+        base_dir = os.path.dirname(self.db_path)
+        try:
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        except Exception:
+            ts = '0'
+        stash_dir = os.path.join(base_dir, 'stash', ts)
+        try:
+            os.makedirs(stash_dir, exist_ok=True)
+
+            # 1) back up the AI DB tables to JSON, then delete their rows.
+            conn = self._get_conn()
+            if conn is None:
+                return None
+            try:
+                cur = conn.cursor()
+                for table in self._AI_DB_TABLES:
+                    cur.execute(f"SELECT * FROM {table}")
+                    cols = [d[0] for d in cur.description]
+                    dump = [dict(zip(cols, row)) for row in cur.fetchall()]
+                    with open(os.path.join(stash_dir, f'{table}.json'), 'w',
+                             encoding='utf-8') as f:
+                        json.dump(dump, f)
+                for table in self._AI_DB_TABLES:
+                    cur.execute(f"DELETE FROM {table}")
+                conn.commit()
+            finally:
+                conn.close()
+
+            # 2) back up + remove the flat AI files.
+            import shutil
+            for name in self._AI_FLAT_FILES:
+                p = os.path.join(base_dir, name)
+                if os.path.exists(p):
+                    shutil.copy2(p, os.path.join(stash_dir, name))
+                    os.remove(p)
+        except Exception:
+            return None
+
+        # 3) reset live in-memory state so the running app reflects the
+        # clear immediately, not just after a restart.
+        RVS_CFG.clear()
+        RVS_CFG.update({'window': RVS_WINDOW, 'streak': RVS_STREAK_THR,
+                        'rhythm': RVS_RHYTHM_THR, 'min': RVS_MIN,
+                        'rhythm_run': RVS_RHYTHM_RUN, 'ride_len': RVS_RIDE_LEN,
+                        'bias': RVS_BIAS_MARGIN})
+        self.entry_policy = None
+        try:
+            self._init_ai_systems()
+        except Exception:
+            pass
+        return stash_dir
+
     def _export_bet_eval_csv(self):
         """Write the Bet Eval stats + raw per-spin bet log to a shareable CSV.
         Saves to ~/Downloads (fallback: next to the DB, then home). Returns path
@@ -2677,6 +2749,55 @@ class LinupApp:
                 style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE))]
             self.page.show_dialog(dlg)
 
+        def _stash_clear_memory(ev):
+            confirm_dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+
+            def do_clear(ev2):
+                path = self._stash_and_clear_ai_memory()
+                confirm_dlg.open = False
+                confirm_dlg.update()
+                result_dlg = ft.AlertDialog(
+                    title=ft.Text("Stash & Clear Memory",
+                                  color=('#27ae60' if path else '#ff4444'),
+                                  weight=ft.FontWeight.BOLD),
+                    content=ft.Text(
+                        (f"Backed up to:\n{path}\n\nAI memory cleared — "
+                         f"suggestions, RVS tuning, and the entry filter "
+                         f"start learning fresh.") if path else
+                        "Stash failed — nothing was cleared.",
+                        color=ft.Colors.WHITE, selectable=True, size=12),
+                    modal=True, bgcolor='#1e1e1e')
+                result_dlg.actions = [ft.ElevatedButton(
+                    "OK", on_click=lambda _e: (setattr(result_dlg, 'open', False),
+                                               result_dlg.update(),
+                                               self.show_bet_eval_view(investment_id)),
+                    style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE))]
+                self.page.show_dialog(result_dlg)
+
+            def cancel(ev2):
+                confirm_dlg.open = False
+                confirm_dlg.update()
+
+            confirm_dlg.title = ft.Text("STASH & CLEAR AI MEMORY",
+                                        color='#ff4444', size=14,
+                                        weight=ft.FontWeight.BOLD)
+            confirm_dlg.content = ft.Text(
+                "Backs up everything the AI has learned (strategy stats, "
+                "decisions, bet log, RVS tuning, entry filter, croupier log) "
+                "to a timestamped folder, then resets it so the AI starts "
+                "learning from zero.\n\nYour sessions, investments, and "
+                "bankroll history are never touched.\n\nBacked up first — "
+                "this can be restored from the stash folder if needed.",
+                color=ft.Colors.WHITE, size=12)
+            confirm_dlg.actions = [
+                ft.ElevatedButton("CANCEL", on_click=cancel, expand=1,
+                    style=ft.ButtonStyle(bgcolor='#555555', color=ft.Colors.WHITE)),
+                ft.ElevatedButton("STASH & CLEAR", on_click=do_clear, expand=1,
+                    style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE)),
+            ]
+            confirm_dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+            self.page.show_dialog(confirm_dlg)
+
         def pct(x):
             return '--' if x is None else f"{x:.0f}%"
 
@@ -2845,6 +2966,10 @@ class LinupApp:
                             ft.ElevatedButton(
                                 "⬇ CSV", on_click=_export,
                                 style=ft.ButtonStyle(bgcolor='#16a085',
+                                                     color=ft.Colors.WHITE)),
+                            ft.ElevatedButton(
+                                "🗄 STASH & CLEAR", on_click=_stash_clear_memory,
+                                style=ft.ButtonStyle(bgcolor='#c0392b',
                                                      color=ft.Colors.WHITE)),
                             ft.Text("AI BET EVAL",
                                     color=ft.Colors.WHITE, size=13,
