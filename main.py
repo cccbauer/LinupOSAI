@@ -265,7 +265,11 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.12-AI"
+        self.page.title      = "Linup v19.1.13-AI"
+        self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
+                                                   # roulette+surfer animation,
+                                                   # replaces Flet's default
+                                                   # dev-mode window icon
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -858,7 +862,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.12-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.13-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
