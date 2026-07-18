@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.13-AI"
+        self.page.title      = "Linup v19.1.14-AI"
         self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
                                                    # roulette+surfer animation,
                                                    # replaces Flet's default
@@ -862,7 +862,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.13-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.14-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -6506,7 +6506,10 @@ class LinupApp:
         def get_border_color(num):
             """Return border color based on safety level."""
             if self.sniper_mode:
-                return '#ffdd00'  # Yellow for sniper ON intersection
+                # Overlapping zones (e.g. Live Sessions ZP+H sharing a
+                # number) stack chips — flag those with orange, single
+                # chip stays yellow.
+                return '#ff6600' if safety_levels.get(num, 1) >= 2 else '#ffdd00'
             else:
                 # Sniper OFF: color by safety level
                 sl = safety_levels.get(num, 0)
