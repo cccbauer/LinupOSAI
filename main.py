@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.14-AI"
+        self.page.title      = "Linup v19.1.15-AI"
         self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
                                                    # roulette+surfer animation,
                                                    # replaces Flet's default
@@ -862,7 +862,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.14-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.15-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -6507,9 +6507,9 @@ class LinupApp:
             """Return border color based on safety level."""
             if self.sniper_mode:
                 # Overlapping zones (e.g. Live Sessions ZP+H sharing a
-                # number) stack chips — flag those with orange, single
+                # number) stack chips — flag those with magenta, single
                 # chip stays yellow.
-                return '#ff6600' if safety_levels.get(num, 1) >= 2 else '#ffdd00'
+                return '#ff00ff' if safety_levels.get(num, 1) >= 2 else '#ffdd00'
             else:
                 # Sniper OFF: color by safety level
                 sl = safety_levels.get(num, 0)
@@ -6782,6 +6782,16 @@ class LinupApp:
             # No outside bets, just show roulette grid centered
             main_content = grid
         
+        overlap_controls = []
+        if self.sniper_mode and any(v >= 2 for v in safety_levels.values()):
+            overlap_controls.append(
+                ft.Text(
+                    "Magenta = 2x chips (overlapping zones)",
+                    color='#ff00ff', size=10, weight=ft.FontWeight.BOLD,
+                    text_align=ft.TextAlign.CENTER,
+                )
+            )
+
         dlg.content = ft.Column(
             tight=True,
             scroll=ft.ScrollMode.AUTO,
@@ -6791,7 +6801,7 @@ class LinupApp:
                 main_content,
                 ft.Container(height=8),
                 _total_lbl,
-            ] + popup_extra,
+            ] + overlap_controls + popup_extra,
         )
         dlg.actions = [
             ft.ElevatedButton(
