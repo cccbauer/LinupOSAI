@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.15-AI"
+        self.page.title      = "Linup v19.1.16-AI"
         self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
                                                    # roulette+surfer animation,
                                                    # replaces Flet's default
@@ -862,7 +862,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.15-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.16-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -5478,8 +5478,11 @@ class LinupApp:
 
     def _grupo_set(self, g):
         """Numbers covered by group g for bet cost / win-check — swaps in the
-        wheel-neighbour-widened Z0/ZG/ZP/H when Live Sessions mode is on."""
-        if getattr(self, 'live_sessions_mode', False) and g in GRUPOS_SECTOR_LS:
+        wheel-neighbour-widened Z0/ZG/ZP/H (e.g. ZP protections 1 & 6) when
+        Live Sessions OR Live Table mode is on."""
+        live = (getattr(self, 'live_sessions_mode', False)
+                or getattr(self, 'live_table_mode', False))
+        if live and g in GRUPOS_SECTOR_LS:
             return GRUPOS_SECTOR_LS[g]
         return GRUPOS_MAESTROS.get(g, set())
 
@@ -5691,7 +5694,14 @@ class LinupApp:
                         self.current_choice = None
                         self.current_decision_id = None
             else:
-                if self.free_spin_mode:
+                live_mode = (getattr(self, 'live_table_mode', False)
+                             or getattr(self, 'live_sessions_mode', False))
+                if live_mode and num == 0:
+                    # Live Table/Live Sessions: no real chips are down on
+                    # this background R/B tracker, so 0 shouldn't discount
+                    # the bank — still tracked (history/stats), just no P/L.
+                    delta = 0.0
+                elif self.free_spin_mode:
                     # Red + Black uses the BASE chip (not CHIP IN): net 0 unless
                     # 0 falls, in which case both chips are lost.
                     base_chip = getattr(self, 'last_base_chip', self.val_fin)
