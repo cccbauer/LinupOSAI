@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.16-AI"
+        self.page.title      = "Linup v19.1.17-AI"
         self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
                                                    # roulette+surfer animation,
                                                    # replaces Flet's default
@@ -862,7 +862,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.16-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.17-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -4237,8 +4237,8 @@ class LinupApp:
 
         # Initial chip denominations: budget-derived, floored to base_chip
         _sug_budget     = sug_bank * sug_max_loss / 100
-        _sug_chip_denom = max(_round_up_chip(_sug_budget / 108), sug_base_chip)
-        sug_fout        = max(_round_up_chip(_sug_budget / 18), sug_base_chip)
+        _sug_chip_denom = max(_round_up_chip(_sug_budget / 270), sug_base_chip)
+        sug_fout        = max(_round_up_chip(_sug_budget / 80), sug_base_chip)
 
         def _f(val):
             try:
@@ -4247,30 +4247,38 @@ class LinupApp:
                 return 0.0
 
         def _chip_label_text_prog(base_chip, bank, max_loss_pct):
-            """CHIP IN label: progression breakdown then percentages."""
+            """CHIP IN label: 4-step recovering ladder (1·2·4·8) then percentages.
+            Multipliers double so every step, when it wins, recovers all prior
+            losses and still nets a base unit — matches _progression_for_N(18)."""
             try:
                 b = _f(base_chip)
                 total_1x = b * 18 * 1
                 total_2x = b * 18 * 2
-                total_3x = b * 18 * 3
-                total    = total_1x + total_2x + total_3x
+                total_4x = b * 18 * 4
+                total_8x = b * 18 * 8
+                total    = total_1x + total_2x + total_4x + total_8x
                 pct_bank = (total / bank * 100) if bank > 0 else 0
                 pct_cap  = (total / capital * 100) if capital > 0 else 0
-                return (f"1x({total_1x:.2f}) + 2x({total_2x:.2f}) + 3x({total_3x:.2f})"
+                return (f"1x({total_1x:.2f}) + 2x({total_2x:.2f}) + 4x({total_4x:.2f})"
+                        f" + 8x({total_8x:.2f})"
                         f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
             except Exception:
                 return ""
 
         def _chip_label_text(chip_val, bank, max_loss_pct):
-            """CHIP OUT label: 2 chips at 1x·3x·5x breakdown then percentages."""
+            """CHIP OUT label: 2 groups on a 4-step recovering ladder (1·3·9·27)
+            then percentages. Multipliers triple so each winning step recovers
+            all prior losses — matches PROG_2_OUT = 2×[1,3,9,27]."""
             try:
-                total_1x = chip_val * 2 * 1
-                total_3x = chip_val * 2 * 3
-                total_5x = chip_val * 2 * 5
-                total    = total_1x + total_3x + total_5x   # chip_val × 18
+                total_1x  = chip_val * 2 * 1
+                total_3x  = chip_val * 2 * 3
+                total_9x  = chip_val * 2 * 9
+                total_27x = chip_val * 2 * 27
+                total    = total_1x + total_3x + total_9x + total_27x  # chip × 80
                 pct_bank = (total / bank * 100) if bank > 0 else 0
                 pct_cap  = (total / capital * 100) if capital > 0 else 0
-                return (f"1x({total_1x:.2f}) + 3x({total_3x:.2f}) + 5x({total_5x:.2f})"
+                return (f"1x({total_1x:.2f}) + 3x({total_3x:.2f}) + 9x({total_9x:.2f})"
+                        f" + 27x({total_27x:.2f})"
                         f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
             except Exception:
                 return ""
@@ -4322,7 +4330,8 @@ class LinupApp:
             return str(int(v)) if v == int(v) else f"{v:g}"
 
         # The four fields share one MAX-LOSS budget: B = bank * maxloss/100.
-        # CHIP IN total = chip × 90, CHIP OUT total = chip × 18 — each equal to B.
+        # CHIP IN total = chip × 270 (18 nums × [1+2+4+8]), CHIP OUT total =
+        # chip × 80 (2 groups × [1+3+9+27]) — each equal to B.
         # Editing any field re-derives the others; chips stay multiples of the
         # base chip and are floored so the budget never exceeds MAX LOSS.
         def _recalc_fin(e=None):
@@ -4336,8 +4345,8 @@ class LinupApp:
                 ml   = _f(self.max_loss_input.value)
                 budget = bk * max(ml, 0) / 100
                 if bk > 0 and budget > 0:
-                    cin  = _snap_to_base(budget / 108, base)  # CHIP IN: 108 chips
-                    cout = _snap_to_base(budget / 18, base)   # CHIP OUT: 18 chips
+                    cin  = _snap_to_base(budget / 270, base)  # CHIP IN: 270 chips
+                    cout = _snap_to_base(budget / 80, base)   # CHIP OUT: 80 chips
                 else:
                     cin = cout = max(base, 0.0)
                 self.fin_input.value  = _fmt(cin)
@@ -4353,13 +4362,13 @@ class LinupApp:
         def _sync_from_chip(chip_val, chips_per_total):
             """A chip was edited → back-solve the shared budget, push the implied
             MAX LOSS %, and return the re-derived chips. chips_per_total is
-            108 (CHIP IN) or 18 (CHIP OUT)."""
+            270 (CHIP IN) or 80 (CHIP OUT)."""
             bk   = _f(self.banca_input.value)
             base = _f(self.fin_base_input.value)
             budget = max(chip_val, 0.0) * chips_per_total
             ml   = (budget / bk * 100) if bk > 0 else 0.0
-            cin  = _snap_to_base(budget / 108, base) if budget > 0 else max(base, 0.0)
-            cout = _snap_to_base(budget / 18, base) if budget > 0 else max(base, 0.0)
+            cin  = _snap_to_base(budget / 270, base) if budget > 0 else max(base, 0.0)
+            cout = _snap_to_base(budget / 80, base) if budget > 0 else max(base, 0.0)
             self.max_loss_input.value = _fmt_pct(ml)
             self.max_loss_input.update()
             return bk, cin, cout
@@ -4370,7 +4379,7 @@ class LinupApp:
                 return
             _busy[0] = True
             try:
-                bk, _cin, cout = _sync_from_chip(_f(self.fin_input.value), 108)
+                bk, _cin, cout = _sync_from_chip(_f(self.fin_input.value), 270)
                 self.fout_input.value = _fmt(cout)
                 self.fout_input.update()
                 _refresh_labels(bk, _f(self.fin_input.value), cout)
@@ -4385,7 +4394,7 @@ class LinupApp:
                 return
             _busy[0] = True
             try:
-                bk, cin, _cout = _sync_from_chip(_f(self.fout_input.value), 18)
+                bk, cin, _cout = _sync_from_chip(_f(self.fout_input.value), 80)
                 self.fin_input.value = _fmt(cin)
                 self.fin_input.update()
                 _refresh_labels(bk, cin, _f(self.fout_input.value))
@@ -4600,11 +4609,11 @@ class LinupApp:
                         self.fin_base_input,
                         self.max_loss_label,
                         self.max_loss_input,
-                        ft.Text("CHIP IN — investment of 18 chips (1x · 2x · 3x)", color='#27ae60', size=12,
+                        ft.Text("CHIP IN — investment of 18 chips (1x · 2x · 4x · 8x)", color='#27ae60', size=12,
                                 weight=ft.FontWeight.BOLD),
                         self.fin_label,
                         self.fin_input,
-                        ft.Text("CHIP OUT — 2 chips · progression (1x · 3x · 5x)", color='#f1c40f', size=12,
+                        ft.Text("CHIP OUT — 2 chips · progression (1x · 3x · 9x · 27x)", color='#f1c40f', size=12,
                                 weight=ft.FontWeight.BOLD),
                         self.fout_label,
                         self.fout_input,
