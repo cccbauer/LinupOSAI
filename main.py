@@ -265,7 +265,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.18-AI"
+        self.page.title      = "Linup v19.1.19-AI"
         self.page.window.icon = "app_icon.png"   # no-op on macOS in flet>=0.80
                                                    # (Window.icon is Windows-only
                                                    # now); real app icon comes
@@ -878,7 +878,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.18-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.19-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -6044,17 +6044,23 @@ class LinupApp:
             else:
                 result &= union_set
 
-        # 0 has no colour/parity/range, so those filters must not drop it when it
-        # belongs to a base selection (e.g. 3a's wheel-spread, or the Z0 sector).
-        # Mirrors the group design where every 3a_L* variant re-adds 0.
-        base_types   = {'DOZEN', 'COLUMN', 'SECTOR', 'WHEEL', 'WAVE'}
-        only_filters = {'COLOR', 'PARITY', 'RANGE'}
-        present_base   = [u for t, u in type_unions.items() if t in base_types]
-        present_filter = [t for t in type_unions if t in only_filters]
-        if (result is not None and 0 not in result
-                and present_base and present_filter
-                and all(0 in u for u in present_base)):
-            result.add(0)
+        # 0 only ever belongs to the wheel-based types (sector/wheel-third/
+        # wave — each partitions all 37 pockets, so exactly one of their
+        # subgroups always covers 0). Dozens, columns, colour, parity and
+        # range are table-layout bets that structurally can't include 0 (a
+        # live '3a_L*' dozen is the one exception, and it already carries 0
+        # in its own union via wheel-neighbour expansion). None of those
+        # should veto 0 when it's genuinely covered by a selected sector,
+        # wheel-third or wave — e.g. W1 (has 0) ∩ 2a/3a (never do) should
+        # still keep 0. Only a *wheel-based* type that selects away from 0
+        # (e.g. T2, which doesn't cover it) counts as a real veto.
+        WHEEL_TYPES = {'SECTOR', 'WHEEL', 'WAVE'}
+        if result is not None and 0 not in result and type_unions:
+            any_has_zero = any(0 in u for u in type_unions.values())
+            wheel_veto = any(0 not in u for t, u in type_unions.items()
+                              if t in WHEEL_TYPES)
+            if any_has_zero and not wheel_veto:
+                result.add(0)
 
         result = result if result is not None else set()
         if not with_weights:
