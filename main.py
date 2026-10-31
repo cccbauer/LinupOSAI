@@ -265,11 +265,12 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.17-AI"
-        self.page.window.icon = "app_icon.png"   # frozen mid-frame of the
-                                                   # roulette+surfer animation,
-                                                   # replaces Flet's default
-                                                   # dev-mode window icon
+        self.page.title      = "Linup v19.1.18-AI"
+        self.page.window.icon = "app_icon.png"   # no-op on macOS in flet>=0.80
+                                                   # (Window.icon is Windows-only
+                                                   # now); real app icon comes
+                                                   # from assets/icon.png via
+                                                   # `flet build macos`
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -758,6 +759,21 @@ class LinupApp:
             return f"{int(round(val)):,}"
         return f"${val:.2f}"
 
+    def _fmt_chip(self, val: float) -> str:
+        """Bet total: chips with USD equivalent in parens (CHIPS) or plain $ (FIAT)."""
+        if self.inv_type == 'CHIPS':
+            rate = getattr(self, 'chip_usd_rate', 0.0)
+            if rate > 0:
+                return f"{val:.2f} chips (${val * rate:.2f})"
+            return f"{val:.2f} chips"
+        return f"${val:.2f}"
+
+    def _fmt_chip_plain(self, val: float) -> str:
+        """Per-chip / breakdown amount: bare chip count (CHIPS) or plain $ (FIAT)."""
+        if self.inv_type == 'CHIPS':
+            return f"{val:.2f} chips"
+        return f"${val:.2f}"
+
     # ──────────────────────────────────────────────────────────────────
     # CRYPTO PRICE FETCH  (CoinGecko free API, no key required)
     # ──────────────────────────────────────────────────────────────────
@@ -862,7 +878,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.17-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.18-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -6279,7 +6295,7 @@ class LinupApp:
             on_ready_cb()
 
         _chip_lbl = ft.Text(
-            f"${chip_per_num:.2f}/num",
+            f"{self._fmt_chip_plain(chip_per_num)}/num",
             color='#f1c40f', size=13,
             weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER,
@@ -6299,7 +6315,7 @@ class LinupApp:
 
         # For outside bets: show only total (no breakdown)
         _total_lbl = ft.Text(
-            f"Total: ${total_cost:.2f}",
+            f"Total: {self._fmt_chip(total_cost)}",
             color='#ecf0f1', size=12, weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER,
         )
@@ -6314,8 +6330,8 @@ class LinupApp:
                     self.fixed_multi = mx
                     _c  = _outside_chip * mx
                     _t  = len(self.grupos_activos) * _c  # num groups × chip_per_group
-                    _chip_lbl.value  = f"${_c:.2f}/num"
-                    _total_lbl.value = f"Total: ${_t:.2f}"
+                    _chip_lbl.value  = f"{self._fmt_chip_plain(_c)}/num"
+                    _total_lbl.value = f"Total: {self._fmt_chip(_t)}"
                     for k, b in _pmx_refs.items():
                         b.style = ft.ButtonStyle(
                             bgcolor='#f39c12' if k == mx else '#3a3a3a',
@@ -6659,7 +6675,7 @@ class LinupApp:
             on_ready_cb()
 
         _chip_lbl = ft.Text(
-            f"${chip_per_num:.2f}/num",
+            f"{self._fmt_chip_plain(chip_per_num)}/num",
             color='#f1c40f', size=13,
             weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER,
@@ -6679,7 +6695,7 @@ class LinupApp:
 
         # For inside bets: show total + breakdown with total chips count
         _total_lbl = ft.Text(
-            f"Total: ${total_cost:.2f}  ({total_chips} × ${chip_per_num:.2f})",
+            f"Total: {self._fmt_chip(total_cost)}  ({total_chips} × {self._fmt_chip_plain(chip_per_num)})",
             color='#ecf0f1', size=12, weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER,
         )
@@ -6692,8 +6708,8 @@ class LinupApp:
                 self.fixed_multi = mx
                 _c  = self.val_fin * mx
                 _t  = total_chips * _c
-                _chip_lbl.value  = f"${_c:.2f}/num"
-                _total_lbl.value = f"Total: ${_t:.2f}  ({total_chips} × ${_c:.2f})"
+                _chip_lbl.value  = f"{self._fmt_chip_plain(_c)}/num"
+                _total_lbl.value = f"Total: {self._fmt_chip(_t)}  ({total_chips} × {self._fmt_chip_plain(_c)})"
                 for k, b in _pmx_refs.items():
                     b.style = ft.ButtonStyle(
                         bgcolor='#f39c12' if k == mx else '#3a3a3a',
@@ -6912,7 +6928,7 @@ class LinupApp:
                 ft.Divider(color='#444444'),
                 ft.Text("If you lose this bet:", color=ft.Colors.WHITE, size=13),
                 ft.Container(height=4),
-                ft.Text(f"Bank: ${potential_bank:.2f}", color='#ff4444',
+                ft.Text(f"Bank: {self._fmt_bank(potential_bank)}", color='#ff4444',
                         size=18, weight=ft.FontWeight.BOLD),
                 ft.Text(f"Loss: {loss_pct*100:.1f}%  (MAX LOSS {max_loss_frac*100:.1f}%)",
                         color='#ff4444', size=13),
@@ -7239,7 +7255,7 @@ class LinupApp:
             
             # Outside bets: show only total cost, no chip breakdown
             if is_simple_outside:
-                self.lbl_inv.value = f"BET: ${total:.2f}"
+                self.lbl_inv.value = f"BET: {self._fmt_chip(total)}"
             else:
                 # Inside bets: show chip breakdown with actual per-number cost
                 if self.sniper_mode and self.prog_on and num_chips > 0:
@@ -7248,9 +7264,11 @@ class LinupApp:
                     effective_multi = multi
                 chip_val = self.val_fin * effective_multi
                 prog_tag = "" if self.prog_on else f" [{multi}x]"
-                self.lbl_inv.value = f"BET: ${total:.2f} ({num_chips}x${chip_val:.4g}){prog_tag}"
+                chip_str = (f"{chip_val:.4g} chips" if self.inv_type == 'CHIPS'
+                            else f"${chip_val:.4g}")
+                self.lbl_inv.value = f"BET: {self._fmt_chip(total)} ({num_chips}x{chip_str}){prog_tag}"
         else:
-            self.lbl_inv.value = "BET: $0.00"
+            self.lbl_inv.value = f"BET: {self._fmt_chip(0)}"
 
     def update_ui(self):
         if not self.lbl_bank:
