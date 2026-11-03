@@ -259,13 +259,14 @@ class LinupApp:
         self.lbl_pl   = None
         self.sug_row  = None
         self.btn_inv  = None
+        self.btn_tune = None
         self.reg_rows_box   = None
         self.reg_header_row = None
         self._on_game_screen = False
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.19-AI"
+        self.page.title      = "Linup v19.1.20-AI"
         self.page.window.icon = "app_icon.png"   # no-op on macOS in flet>=0.80
                                                    # (Window.icon is Windows-only
                                                    # now); real app icon comes
@@ -362,6 +363,14 @@ class LinupApp:
             label, size=size,
             weight=ft.FontWeight.BOLD if bold else ft.FontWeight.NORMAL,
             text_align=ft.TextAlign.CENTER,
+        )
+
+    def _fit_btn_txt(self, label, size=12):
+        """Button label sized to fit a narrow shared-row button without
+        clipping; wraps a two-word label onto a second line instead."""
+        return ft.Text(
+            label, size=size, weight=ft.FontWeight.BOLD,
+            text_align=ft.TextAlign.CENTER, no_wrap=False, max_lines=2,
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -713,6 +722,11 @@ class LinupApp:
         self.stop_loss_triggered  = False
         self.goal_achieved_shown  = False
         self.activa               = False
+        self.tune_activa          = False  # TUNE: pending practice selection, no bank impact
+        self.tune_hits            = 0
+        self.tune_total           = 0
+        self.last_was_tune        = False  # so UNDO can revert the stat above
+        self.last_tune_hit        = False
         self.free_spin_mode       = False
         self.live_table_mode      = False
         self.live_sessions_mode   = False
@@ -878,7 +892,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.19-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.20-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -1629,21 +1643,21 @@ class LinupApp:
                     ft.Row(
                         controls=[
                             ft.ElevatedButton(
-                                "COMPOUND GROWTH",
+                                content=self._fit_btn_txt("COMPOUND GROWTH"),
                                 on_click=_open_projection,
                                 expand=True, height=45,
                                 style=ft.ButtonStyle(bgcolor='#2980b9',
                                                      color=ft.Colors.WHITE),
                             ),
                             ft.ElevatedButton(
-                                "ACTUAL GRAPH",
+                                content=self._fit_btn_txt("ACTUAL GRAPH"),
                                 on_click=_open_graph,
                                 expand=True, height=45,
                                 style=ft.ButtonStyle(bgcolor='#6c3483',
                                                      color=ft.Colors.WHITE),
                             ),
                             ft.ElevatedButton(
-                                "EDIT SESSIONS",
+                                content=self._fit_btn_txt("EDIT SESSIONS"),
                                 on_click=_edit_sessions,
                                 expand=True, height=45,
                                 style=ft.ButtonStyle(bgcolor='#d35400',
@@ -1657,7 +1671,7 @@ class LinupApp:
                     ft.Row(
                         controls=[
                             ft.ElevatedButton(
-                                "AI BET EVAL",
+                                content=self._fit_btn_txt("AI BET EVAL"),
                                 on_click=_open_bet_eval,
                                 expand=True, height=45,
                                 style=ft.ButtonStyle(bgcolor='#16a085',
@@ -4980,15 +4994,25 @@ class LinupApp:
             content=ft.Row(controls=[self.lbl_bank, self.lbl_inv, self.lbl_pl]),
         )
 
-        # ── AI combination-coach bar ──────────────────────────────────────
+        # ── AI combination-coach + TUNE hit-rate bar ──────────────────────
         self.lbl_ai_info = ft.Text(
             self._get_ai_info_display(),
-            color='#f1c40f', weight=ft.FontWeight.BOLD, size=16,
-            text_align=ft.TextAlign.CENTER, no_wrap=False,
+            color='#f1c40f', weight=ft.FontWeight.BOLD, size=13,
+            text_align=ft.TextAlign.CENTER, no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
         )
+        self.lbl_tune_info = ft.Text(
+            self._get_tune_info_display(),
+            color='#bb8fce', weight=ft.FontWeight.BOLD, size=12,
+            text_align=ft.TextAlign.CENTER, no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
+        coach_rows = ([self.lbl_ai_info] if getattr(self, 'ai_ok', False) else []) \
+                     + [self.lbl_tune_info]
         ai_bar = ft.Container(
-            bgcolor='#2a2a3e', padding=4, content=self.lbl_ai_info,
-        ) if getattr(self, 'ai_ok', False) else None
+            bgcolor='#2a2a3e', padding=4,
+            content=ft.Column(controls=coach_rows, spacing=2, tight=True),
+        )
 
         # ── Progression ON/OFF + fixed multiplier bar ─────────────────────
         self.prog_on     = True
@@ -5138,9 +5162,14 @@ class LinupApp:
                         updated.append(g)
                 self.grupos_activos = updated
                 for opt, btn in _all_filter_btns:
+                    # R/B are fixed-size circles — keep that shape through
+                    # every restyle, same as the main mixer filter row.
+                    shape_kwargs = ({'shape': ft.CircleBorder(), 'padding': 0}
+                                     if opt in ('R', 'B') else {})
                     btn.style = ft.ButtonStyle(
                         bgcolor=_ACTIVE_COLOR[opt] if opt == new_f else _INACTIVE,
                         color=ft.Colors.WHITE,
+                        **shape_kwargs,
                     )
                     btn.update()
                 self._refresh_mixer_colors()
@@ -5149,25 +5178,36 @@ class LinupApp:
                     self.lbl_inv.update()
                 self.actualizar_sugerencias()
 
-            def _filter_btn(opt, label, height=34, size=11):
+            def _filter_btn(opt, label, height=34, size=11, circle=False, expand=7):
                 def _click(e, o=opt):
                     _apply_filter(None if self.live_filter == o else o)
-                btn = ft.ElevatedButton(
-                    content=self._txt(label, size=size),
-                    expand=True, height=height,
-                    style=ft.ButtonStyle(bgcolor=_INACTIVE, color=ft.Colors.WHITE),
-                    on_click=_click,
-                )
+                if circle:
+                    # R/B as a fixed-size circle with the letter centered,
+                    # same as the main mixer filter row.
+                    btn = ft.ElevatedButton(
+                        content=self._txt(label, size=size),
+                        width=height, height=height,
+                        style=ft.ButtonStyle(bgcolor=_INACTIVE, color=ft.Colors.WHITE,
+                                             shape=ft.CircleBorder(), padding=0),
+                        on_click=_click,
+                    )
+                else:
+                    btn = ft.ElevatedButton(
+                        content=self._txt(label, size=size),
+                        expand=expand, height=height,
+                        style=ft.ButtonStyle(bgcolor=_INACTIVE, color=ft.Colors.WHITE),
+                        on_click=_click,
+                    )
                 _all_filter_btns.append((opt, btn))
                 return btn
 
             row2 = ft.Row(controls=[
-                _filter_btn('1-18',  '1-18',  height=28, size=9),
-                _filter_btn('Even',  'Even',  height=28, size=9),
-                _filter_btn('R',     'RED',   height=28, size=9),
-                _filter_btn('B',     'BLACK', height=28, size=9),
-                _filter_btn('Odd',   'Odd',   height=28, size=9),
-                _filter_btn('19-36', '19-36', height=28, size=9),
+                _filter_btn('1-18',  '1-18',  height=28, size=9, expand=8),
+                _filter_btn('Even',  'Even',  height=28, size=9, expand=7),
+                _filter_btn('R',     'R',     height=28, size=11, circle=True),
+                _filter_btn('B',     'B',     height=28, size=11, circle=True),
+                _filter_btn('Odd',   'Odd',   height=28, size=9, expand=7),
+                _filter_btn('19-36', '19-36', height=28, size=9, expand=8),
             ], spacing=2, tight=True)
             rb_bar = ft.Container(
                 bgcolor='#1a2a3a',
@@ -5231,17 +5271,36 @@ class LinupApp:
                     ft.ControlState.PRESSED: ft.Colors.with_opacity(0.7, '#000000') if g == 'B'
                                             else ft.Colors.with_opacity(0.4, ft.Colors.WHITE),
                 }
-                btn = ft.ElevatedButton(
-                    content=self._txt(g, size=text_size),
-                    data={'name': g, 'color': btn_color},
-                    on_click=self.seleccionar_mixer,
-                    expand=True, height=40,
-                    style=ft.ButtonStyle(
-                        bgcolor=btn_color, color=ft.Colors.WHITE,
-                        animation_duration=400,
-                        overlay_color=overlay,
-                    ),
-                )
+                if g in ('R', 'B'):
+                    # Red/Black as fixed-size circles (letter centered inside),
+                    # like the felt layout — not flexed with the other labels.
+                    btn = ft.ElevatedButton(
+                        content=self._txt(g, size=text_size),
+                        data={'name': g, 'color': btn_color},
+                        on_click=self.seleccionar_mixer,
+                        width=40, height=40,
+                        style=ft.ButtonStyle(
+                            bgcolor=btn_color, color=ft.Colors.WHITE,
+                            animation_duration=400,
+                            overlay_color=overlay,
+                            shape=ft.CircleBorder(),
+                            padding=0,
+                        ),
+                    )
+                else:
+                    # High/Low (1-18, 19-36) a bit bigger than Even/Odd.
+                    btn_expand = 8 if g in ('1-18', '19-36') else 7
+                    btn = ft.ElevatedButton(
+                        content=self._txt(g, size=text_size),
+                        data={'name': g, 'color': btn_color},
+                        on_click=self.seleccionar_mixer,
+                        expand=btn_expand, height=40,
+                        style=ft.ButtonStyle(
+                            bgcolor=btn_color, color=ft.Colors.WHITE,
+                            animation_duration=400,
+                            overlay_color=overlay,
+                        ),
+                    )
                 self.mixer_btns[g] = btn
                 filter_row_btns.append(btn)
             mixer_rows.append(ft.Row(controls=filter_row_btns, spacing=2))
@@ -5251,30 +5310,45 @@ class LinupApp:
             content=ft.Column(controls=mixer_rows, spacing=2),
         )
 
+        def _ctrl_btn_txt(label, size=11):
+            # Sized per-button to fit its word without clipping; wraps
+            # (rather than clips) a two-word label onto a second line.
+            return ft.Text(
+                label, size=size, weight=ft.FontWeight.BOLD,
+                text_align=ft.TextAlign.CENTER, no_wrap=False, max_lines=2,
+            )
+
         self.btn_inv = ft.ElevatedButton(
-            content=self._txt("INVEST"),
+            content=_ctrl_btn_txt("INVEST", size=11),
             on_click=self.confirmar_manual,
-            expand=2, height=45,
+            expand=8, height=50,
             style=ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.WHITE,
                                  animation_duration=400),
         )
+        self.btn_tune = ft.ElevatedButton(
+            content=_ctrl_btn_txt("TUNE", size=11),
+            on_click=self.confirmar_tune,
+            expand=5, height=50,
+            style=ft.ButtonStyle(bgcolor='#8e44ad', color=ft.Colors.WHITE,
+                                 animation_duration=400),
+        )
         btn_corr = ft.ElevatedButton(
-            content=self._txt("UNDO"),
+            content=_ctrl_btn_txt("UNDO", size=11),
             on_click=self.corregir_ultimo,
-            expand=1, height=45,
+            expand=5, height=50,
             style=ft.ButtonStyle(bgcolor='#f39c12', color=ft.Colors.WHITE,
                                  animation_duration=400),
         )
         btn_fin = ft.ElevatedButton(
-            content=self._txt("FINISH"),
+            content=_ctrl_btn_txt("FINISH", size=11),
             on_click=self.finalizar_sesion,
-            expand=1, height=45,
+            expand=5, height=50,
             style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE,
                                  animation_duration=400),
         )
         ctrl_bar = ft.Container(
             padding=ft.padding.symmetric(horizontal=4, vertical=4),
-            content=ft.Row(controls=[self.btn_inv, btn_corr, btn_fin], spacing=4),
+            content=ft.Row(controls=[self.btn_inv, self.btn_tune, btn_corr, btn_fin], spacing=4),
         )
 
         teclado_controls = [
@@ -5638,6 +5712,7 @@ class LinupApp:
             _wait_snapshot = self.spins_since_entry   # captured before any
                                                        # reset below so the log
                                                        # reflects the real wait
+            self.last_was_tune = False   # only the TUNE branch below sets this
             if self.activa:
                 n                     = len(self.grupos_activos)
                 is_simple_outside     = self._is_simple_outside_bet()
@@ -5718,6 +5793,31 @@ class LinupApp:
                     finally:
                         self.current_choice = None
                         self.current_decision_id = None
+            elif self.tune_activa:
+                # TUNE: same hit/miss check as a real bet, no bank/progression
+                # impact — just scored into tune_hits/tune_total.
+                is_simple_outside = self._is_simple_outside_bet()
+                if self.sniper_mode and not is_simple_outside:
+                    intersection, _ = self._compute_intersection(with_weights=True)
+                    is_win = num in intersection
+                else:
+                    is_win = any(num in self._grupo_set(g) for g in self.grupos_activos)
+
+                self.tune_total    += 1
+                if is_win:
+                    self.tune_hits += 1
+                self.last_was_tune  = True
+                self.last_tune_hit  = is_win
+                self.last_bank_delta  = 0.0
+                self.last_bet_outside = None
+                self._refresh_tune_label()
+
+                # Deliberately NOT logged via _log_real_bet / strategy_model —
+                # a practice pick is neither a real entry nor a real pass, and
+                # shouldn't skew either dataset. _acted stays False below.
+                self.tune_activa    = False
+                self.grupos_activos = []
+                self.limpiar_seleccion_visual()
             else:
                 live_mode = (getattr(self, 'live_table_mode', False)
                              or getattr(self, 'live_sessions_mode', False))
@@ -5908,7 +6008,11 @@ class LinupApp:
         for g, btn in self.mixer_btns.items():
             base_color = btn.data['color']
             is_outside = g in outside_groups
-            
+            # R/B are fixed-size circles — keep that shape through every
+            # restyle, otherwise they snap back to a rectangle (and look
+            # like they've shifted) the moment any mixer button is pressed.
+            shape_kwargs = {'shape': ft.CircleBorder(), 'padding': 0} if g in ('R', 'B') else {}
+
             if g in active_display:
                 if is_outside:
                     # Outside bets: yellow text (like inside bets) to indicate selection
@@ -5916,6 +6020,7 @@ class LinupApp:
                         bgcolor=base_color, color='#ffdd00',
                         animation_duration=400,
                         overlay_color={ft.ControlState.PRESSED: ft.Colors.with_opacity(0.4, ft.Colors.WHITE)},
+                        **shape_kwargs,
                     )
                 else:
                     # Inside bets: yellow text + original background
@@ -5923,6 +6028,7 @@ class LinupApp:
                         bgcolor=base_color, color='#ffdd00',
                         animation_duration=400,
                         overlay_color={ft.ControlState.PRESSED: ft.Colors.with_opacity(0.4, ft.Colors.WHITE)},
+                        **shape_kwargs,
                     )
             elif has_sel:
                 # Deselected (others selected): dimmed base color + white text for visibility
@@ -5930,6 +6036,7 @@ class LinupApp:
                 btn.style = ft.ButtonStyle(
                     bgcolor=dimmed_color, color=ft.Colors.WHITE,
                     animation_duration=400,
+                    **shape_kwargs,
                 )
             else:
                 # Unselected (no active): full color with white text
@@ -5937,6 +6044,7 @@ class LinupApp:
                     bgcolor=base_color, color=ft.Colors.WHITE,
                     animation_duration=400,
                     overlay_color={ft.ControlState.PRESSED: ft.Colors.with_opacity(0.4, ft.Colors.WHITE)},
+                    **shape_kwargs,
                 )
             btn.update()
         # Live-grade the new selection in the AI coach bar.
@@ -6897,6 +7005,18 @@ class LinupApp:
             except Exception:
                 self.current_choice = None
 
+    def _activate_tune(self):
+        """TUNE: arm the same selection as a practice pick — no bank impact,
+        no MAX LOSS warning, no AI decision logging. Resolved in
+        process_number exactly like a real bet, just scored into
+        tune_hits/tune_total instead of the bank."""
+        self.tune_activa = True
+        self.btn_tune.style = ft.ButtonStyle(bgcolor='#3498db', color=ft.Colors.WHITE,
+                                             animation_duration=400)
+        self.btn_tune.update()
+        self.update_inv_label()
+        self.lbl_inv.update()
+
     def _check_pre_bet_warning(self, on_confirm):
         """Show warning if losing this bet would breach the configured MAX LOSS."""
         if self.stop_loss_triggered or self.banca_inicial <= 0:
@@ -6984,10 +7104,17 @@ class LinupApp:
         )
 
     def confirmar_manual(self, e=None):
-        if not self.grupos_activos:
+        if not self.grupos_activos or self.tune_activa:
             return
         # Warning popup before the chip/table setup popup
         self._proceed_bet()
+
+    def confirmar_tune(self, e=None):
+        """TUNE: same selection popup as INVEST, but no MAX LOSS warning and
+        no bank impact — just scores the pick once the next number lands."""
+        if not self.grupos_activos or self.activa:
+            return
+        self._show_roulette_chip_popup(self._activate_tune)
 
     def auto_invertir_sug(self, grupos):
         self.limpiar_seleccion_visual()
@@ -7068,6 +7195,25 @@ class LinupApp:
         except Exception:
             pass
 
+    def _get_tune_info_display(self) -> str:
+        """TUNE row: running hit-rate from practice selections (no bank impact)."""
+        total = getattr(self, 'tune_total', 0)
+        hits  = getattr(self, 'tune_hits', 0)
+        if total == 0:
+            return "TUNE: —"
+        return f"TUNE: {hits / total * 100:.0f}%  ({hits}/{total})"
+
+    def _refresh_tune_label(self):
+        """Update the TUNE hit-rate row in place (safe to call anytime)."""
+        lbl = getattr(self, 'lbl_tune_info', None)
+        if lbl is None:
+            return
+        try:
+            lbl.value = self._get_tune_info_display()
+            lbl.update()
+        except Exception:
+            pass
+
     # ──────────────────────────────────────────────────────────────────
     # SUGGESTIONS
     # ──────────────────────────────────────────────────────────────────
@@ -7122,6 +7268,12 @@ class LinupApp:
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 )
             return self._txt(label, size=12)
+
+        def _sug_expand(label):
+            # Two-group combos ("A+B") need more room than a short single
+            # label ("---", "WAIT", a lone group code) — same 7:8 ratio as
+            # the Even/Odd vs High/Low split in the filter row below.
+            return 8 if '+' in label else 7
 
         live = getattr(self, 'live_table_mode', False)
         lf   = getattr(self, 'live_filter', None)   # e.g. None, 'R', 'B', '1-18', …
@@ -7180,7 +7332,7 @@ class LinupApp:
                 new_btns.append(
                     ft.ElevatedButton(
                         content=_sug_content(label),
-                        expand=True, height=40,
+                        expand=_sug_expand(label), height=40,
                         on_click=click,
                         style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
                     )
@@ -7204,7 +7356,7 @@ class LinupApp:
                 new_btns.append(
                     ft.ElevatedButton(
                         content=_sug_content(label),
-                        expand=True, height=40,
+                        expand=_sug_expand(label), height=40,
                         on_click=click,
                         style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
                     )
@@ -7228,7 +7380,7 @@ class LinupApp:
             new_btns.append(
                 ft.ElevatedButton(
                     content=_sug_content(label),
-                    expand=True, height=40,
+                    expand=_sug_expand(label), height=40,
                     on_click=click,
                     style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
                 )
@@ -7245,6 +7397,10 @@ class LinupApp:
             self.btn_inv.style = ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.WHITE,
                                                 animation_duration=400)
             self.btn_inv.update()
+        if getattr(self, 'btn_tune', None):
+            self.btn_tune.style = ft.ButtonStyle(bgcolor='#8e44ad', color=ft.Colors.WHITE,
+                                                 animation_duration=400)
+            self.btn_tune.update()
         self.grupos_activos = []
         self._refresh_mixer_colors()
         self.update_inv_label()
@@ -7306,6 +7462,12 @@ class LinupApp:
             self.limpiar_seleccion_visual()
             self.update_ui()
             return
+        # Same, for a pending TUNE pick — nothing was scored yet, just cancel it.
+        if self.tune_activa:
+            self.tune_activa = False
+            self.limpiar_seleccion_visual()
+            self.update_ui()
+            return
         if self.history_nums:
             self.history_nums.pop()
             if self.sliding_window:
@@ -7339,6 +7501,13 @@ class LinupApp:
                         self.nivel_martingala_in -= 1
             self.last_bet_outside = None
             self.last_prog_state  = True
+            # Reverse a TUNE resolution if that's what the undone number was
+            if getattr(self, 'last_was_tune', False):
+                self.tune_total = max(0, self.tune_total - 1)
+                if self.last_tune_hit:
+                    self.tune_hits = max(0, self.tune_hits - 1)
+                self.last_was_tune = False
+                self._refresh_tune_label()
             self.update_registration_table()
             self.update_ui()
 
