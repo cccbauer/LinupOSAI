@@ -266,7 +266,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.20-AI"
+        self.page.title      = "Linup v19.1.21-AI"
         self.page.window.icon = "app_icon.png"   # no-op on macOS in flet>=0.80
                                                    # (Window.icon is Windows-only
                                                    # now); real app icon comes
@@ -749,7 +749,12 @@ class LinupApp:
         self.session_id           = None
         self.play_session_id      = None   # unique per play session (bet log)
         self.inv_name             = ""
-        self.inv_capital          = 0.0
+        self.inv_capital          = 0.0   # INITIAL capital — fixed P/L baseline
+        self.inv_capital_usd      = 0.0
+        self.inv_current_capital            = 0.0   # CURRENT capital — live sum of table banks
+        self.inv_current_capital_usd        = 0.0
+        self.inv_other_current_capital      = 0.0
+        self.inv_other_current_capital_usd  = 0.0
         self.chip_usd_rate        = 0.0   # USD per chip (CHIPS investments)
         self.inv_other_pl         = 0.0
         self.inv_type             = 'FIAT'
@@ -892,7 +897,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.20-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.21-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -1438,8 +1443,41 @@ class LinupApp:
                         w, l, bk = 0, 0, float(init_bank)
                     all_tdata.append((mesa_name, float(init_bank), w, l, bk))
 
+                # CHIPS capital must always equal the sum of each table's chip
+                # bank — self-heal any stale/drifted value (e.g. from a table
+                # bank edited before this sync existed) right when it's viewed.
+                if db_inv_type == 'CHIPS' and all_tdata:
+                    correct_capital = round(sum(d[1] for d in all_tdata), 2)
+                    if abs(correct_capital - float(inv_capital)) > 0.01:
+                        inv_capital = correct_capital
+                        try:
+                            cursor.execute(
+                                "UPDATE investments SET capital=? WHERE id=?",
+                                (correct_capital, investment_id)
+                            )
+                            conn.commit()
+                        except Exception:
+                            pass
+
                 total_wins   = sum(d[2] for d in all_tdata)
                 total_losses = sum(d[3] for d in all_tdata)
+
+                # Blended USD value of the WHOLE investment's chips, each
+                # table's chips priced at that table's own rate — not a
+                # single table's rate applied to every chip, since BTC/USDT
+                # chips are worth different amounts of USD per chip.
+                total_usd_cap = sum(
+                    d[1] * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
+                ) if db_inv_type == 'CHIPS' else float(inv_capital)
+
+                # CURRENT capital: the live sum of every table's CURRENT bank
+                # (last_bank, not init_bank) — this is what MAX LOSS % and the
+                # chip budgets are sized against. INITIAL capital (inv_capital
+                # / total_usd_cap above) stays fixed as the P/L baseline.
+                current_cap_total = sum(d[4] for d in all_tdata)
+                current_cap_usd = sum(
+                    d[4] * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
+                ) if db_inv_type == 'CHIPS' else current_cap_total
 
                 # Sum profits per mesa from compound_sessions (source of truth after editing)
                 cursor.execute(
@@ -1449,12 +1487,25 @@ class LinupApp:
                 )
                 mesa_pl = {row[0]: (row[1] or 0.0) for row in cursor.fetchall()}
 
+                # For CHIPS, convert each mesa's P/L to USD before combining
+                # across tables — different tokens' chips aren't directly
+                # comparable (same reasoning as the blended capital above).
+                if db_inv_type == 'CHIPS':
+                    mesa_pl_unit = {k: v * mesa_chip_rate.get(k, 0.0) for k, v in mesa_pl.items()}
+                else:
+                    mesa_pl_unit = mesa_pl
+
                 for i, (mesa_name, init_bank, wins, losses, last_bank) in enumerate(all_tdata):
-                    # P/L from all OTHER tables (used in game screen bar)
-                    if mesa_pl:
-                        other_pl = sum(v for k, v in mesa_pl.items() if k != mesa_name)
+                    # P/L from all OTHER tables (used in game screen's CAPITAL
+                    # P/L bar) — USD for CHIPS, native $ for FIAT, so this
+                    # table's own P/L can be added to it in a shared unit.
+                    if mesa_pl_unit:
+                        other_pl = sum(v for k, v in mesa_pl_unit.items() if k != mesa_name)
                     else:
-                        other_pl = sum((d[4] - d[1]) for j, d in enumerate(all_tdata) if j != i)
+                        other_pl = sum(
+                            (d[4] - d[1]) * (mesa_chip_rate.get(d[0], 0.0) if db_inv_type == 'CHIPS' else 1.0)
+                            for j, d in enumerate(all_tdata) if j != i
+                        )
 
                     total = wins + losses
                     eff   = (wins / total * 100) if total > 0 else 0.0
@@ -1471,12 +1522,31 @@ class LinupApp:
                                f"  |  W:{wins} L:{losses}  |  {eff:.0f}%")
 
                     def make_loader(m, bk, has_hist, opl, itype=db_inv_type,
-                                    rate=mesa_chip_rate.get(mesa_name, 0.0)):
+                                    rate=mesa_chip_rate.get(mesa_name, 0.0),
+                                    cap_usd=total_usd_cap,
+                                    cur_cap=current_cap_total, cur_cap_usd=current_cap_usd):
                         def loader(ev):
                             self.reset_variables()
                             self.current_investment_id = investment_id
                             self.inv_name      = inv_name
-                            self.inv_capital   = float(inv_capital)
+                            # INITIAL capital — fixed cost basis, the baseline
+                            # CAPITAL P/L is measured against. Blended USD uses
+                            # each table's own rate, not this table's rate
+                            # applied to every chip (that would misprice the
+                            # other tables' chips).
+                            self.inv_capital     = float(inv_capital)
+                            self.inv_capital_usd = float(cap_usd)
+                            # CURRENT capital — live sum of every table's
+                            # CURRENT bank; MAX LOSS %, CHIP IN/OUT budgets are
+                            # sized against this, not the fixed initial figure.
+                            self.inv_current_capital     = float(cur_cap)
+                            self.inv_current_capital_usd = float(cur_cap_usd)
+                            # Current capital contributed by every OTHER
+                            # table, held aside so editing THIS table's bank
+                            # can re-derive current capital live:
+                            # other_current_capital + new_bank(_usd).
+                            self.inv_other_current_capital     = float(cur_cap) - float(bk)
+                            self.inv_other_current_capital_usd = float(cur_cap_usd) - float(bk) * float(rate)
                             self.chip_usd_rate = float(rate)  # USD per chip (CHIPS only)
                             self.inv_other_pl  = opl
                             self.inv_type      = itype
@@ -1525,10 +1595,7 @@ class LinupApp:
                 # ── Actual saved sessions (primary view) ───────────────
                 num_sessions = total_wins + total_losses
 
-                # For CHIPS: initial USD capital + USD P/L from mesa rates
-                total_usd_cap = sum(
-                    d[1] * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
-                ) if db_inv_type == 'CHIPS' else float(inv_capital)
+                # For CHIPS: USD P/L from mesa rates (total_usd_cap computed above)
                 total_usd_pl = sum(
                     (d[4] - d[1]) * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
                 ) if db_inv_type == 'CHIPS' else total_pl
@@ -4086,15 +4153,34 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=50,
         )
         capital_field = ft.TextField(
-            label="Capital (chips)" if edit_inv_type == 'CHIPS' else "Capital ($)",
+            label=("Capital (chips)  ·  auto-sum of table banks"
+                   if edit_inv_type == 'CHIPS' else "Capital ($)"),
             value=str(inv_capital),
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=50,
             keyboard_type=ft.KeyboardType.NUMBER,
+            read_only=(edit_inv_type == 'CHIPS'),
         )
 
         # Table edit rows: (table_id, name_field, bank_field)
         table_rows_ui = []
         table_fields  = []
+
+        def _resync_chips_capital(_=None):
+            # For CHIPS, the investment's total capital IS the sum of each
+            # table's chip bank — keep the field in sync as banks are edited
+            # so it can never drift from the tables like it used to.
+            total = 0.0
+            for _tid, _nf, bf in table_fields:
+                try:
+                    total += float(bf.value or 0)
+                except Exception:
+                    pass
+            capital_field.value = str(round(total, 2))
+            try:
+                capital_field.update()
+            except Exception:
+                pass
+
         for tid, mname, mbank in tables_data:
             nf = ft.TextField(
                 value=mname,
@@ -4105,6 +4191,7 @@ class LinupApp:
                 value=str(mbank),
                 bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
                 keyboard_type=ft.KeyboardType.NUMBER, expand=1,
+                on_change=(_resync_chips_capital if edit_inv_type == 'CHIPS' else None),
             )
             table_fields.append((tid, nf, bf))
             table_rows_ui.append(ft.Row(controls=[nf, bf], spacing=6))
@@ -4114,8 +4201,13 @@ class LinupApp:
             if not conn2:
                 return
             try:
-                new_name    = name_field.value.strip().upper() or inv_name
-                new_capital = float(capital_field.value or inv_capital)
+                new_name = name_field.value.strip().upper() or inv_name
+                if edit_inv_type == 'CHIPS':
+                    new_capital = sum(
+                        float(bf.value or 0) for _tid, _nf, bf in table_fields
+                    )
+                else:
+                    new_capital = float(capital_field.value or inv_capital)
                 conn2.execute(
                     "UPDATE investments SET name=?, capital=? WHERE id=?",
                     (new_name, round(new_capital, 2), inv_id)
@@ -4233,11 +4325,6 @@ class LinupApp:
     # SESSION SETUP FORM
     # ──────────────────────────────────────────────────────────────────
     def render_setup_form(self, is_continue: bool):
-        self.table_input = ft.TextField(
-            value=str(self.nombre_mesa),
-            bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
-            read_only=True,
-        )
         sug_bank      = self.banca_actual
         sug_max_loss  = getattr(self, 'last_max_loss', 2.0)
         # Per-table base chip: remembered from the last setup on THIS table,
@@ -4245,17 +4332,62 @@ class LinupApp:
         sug_base_chip = self._load_base_chip(
             getattr(self, 'current_investment_id', 0), self.nombre_mesa,
             default=getattr(self, 'last_base_chip', 0.1))
-        capital       = getattr(self, 'inv_capital', 0.0)
-        # For CHIPS investments the bank, budget and capital are all in CHIPS,
-        # so the percentages stay in one unit. We show the USD equivalent in
-        # parenthesis using the loaded table's USD-per-chip rate.
+        # INITIAL capital — fixed cost basis, the baseline CAPITAL P/L is
+        # measured against. Never changes from editing a bank here.
+        initial_capital     = getattr(self, 'inv_capital', 0.0)
         chips_mode    = (getattr(self, 'inv_type', 'FIAT') == 'CHIPS')
         usd_per_chip  = getattr(self, 'chip_usd_rate', 0.0)
+        initial_capital_usd = getattr(self, 'inv_capital_usd', initial_capital * usd_per_chip)
+        # CURRENT capital — live sum of every table's CURRENT bank. MAX LOSS
+        # %, CHIP IN/OUT budgets, and all %-of-capital math below are sized
+        # against THIS, not the fixed initial figure. For CHIPS investments
+        # this is a raw chip-count sum that may mix several tokens (e.g.
+        # BTC-table chips + USDT-table chips), which aren't directly
+        # comparable — any ratio math must go through current_capital_usd
+        # (_pct_of_capital / _cap_basis below), never the raw chip figure.
+        current_capital     = getattr(self, 'inv_current_capital', 0.0)
+        current_capital_usd = getattr(self, 'inv_current_capital_usd', current_capital * usd_per_chip)
+
+        def _initial_capital_text():
+            if chips_mode:
+                return f"INITIAL CAPITAL | {initial_capital:,.0f} chips | ${initial_capital_usd:,.2f}"
+            return f"INITIAL CAPITAL | ${initial_capital:,.2f}"
+
+        def _current_capital_text(cap, cap_usd):
+            if chips_mode:
+                return f"CURRENT CAPITAL | {cap:,.0f} chips | ${cap_usd:,.2f}"
+            return f"CURRENT CAPITAL | ${cap:,.2f}"
+
+        def _table_bank_header_text(bank):
+            if chips_mode:
+                return f"{self.nombre_mesa} | {bank:,.0f} chips | ${bank * usd_per_chip:,.2f}"
+            return f"{self.nombre_mesa} | ${bank:,.2f}"
+
+        # no_wrap + ellipsis keeps each header on exactly one line regardless
+        # of screen width, truncating rather than wrapping to a 2nd line.
+        self.capital_initial_label = ft.Text(
+            _initial_capital_text(),
+            size=12, weight=ft.FontWeight.BOLD, color='#7f8c8d',
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
+        self.capital_header_label = ft.Text(
+            _current_capital_text(current_capital, current_capital_usd),
+            size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE,
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
+        self.table_bank_header_label = ft.Text(
+            _table_bank_header_text(sug_bank),
+            size=13, weight=ft.FontWeight.BOLD, color='#3498db',
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
 
         def _amt(v):
-            """Budget amount: chips with USD in parens (CHIPS) or plain $ (FIAT)."""
+            """Budget amount: chips | USD (CHIPS) or plain $ (FIAT)."""
             if chips_mode:
-                return f"{v:.2f} chips (${v * usd_per_chip:.2f})"
+                return f"{v:.2f} chips | ${v * usd_per_chip:.2f}"
             return f"${v:.2f}"
 
         def _round_up_chip(val):
@@ -4265,10 +4397,31 @@ class LinupApp:
                 return math.floor(round(val * 10, 8)) / 10
             return float(math.floor(val / 10) * 10)
 
-        # Initial chip denominations: budget-derived, floored to base_chip
+        # Initial chip denominations: budget-derived, floored to base_chip.
+        # The budget itself is anchored to BANK (unchanged — this also drives
+        # the live pre-bet MAX LOSS warning, which is bank-relative). The
+        # CAPITAL-relative % below is the same $ budget just re-expressed
+        # against total capital, shown as a second line.
         _sug_budget     = sug_bank * sug_max_loss / 100
         _sug_chip_denom = max(_round_up_chip(_sug_budget / 270), sug_base_chip)
         sug_fout        = max(_round_up_chip(_sug_budget / 80), sug_base_chip)
+
+        def _pct_of_capital(native_amt):
+            """native_amt is in THIS table's own unit (chips for CHIPS, $ for
+            FIAT). % is of CURRENT capital (the live sum of every table's
+            bank), not the fixed initial figure. CHIPS capital may span
+            several tokens, so raw chip counts aren't comparable across
+            tables — convert to USD first using THIS table's rate, then
+            divide by the blended USD current capital. FIAT stays in native
+            $ throughout (one unit already)."""
+            if chips_mode:
+                return (native_amt * usd_per_chip / current_capital_usd * 100) if current_capital_usd > 0 else 0.0
+            return (native_amt / current_capital * 100) if current_capital > 0 else 0.0
+
+        def _cap_basis():
+            return current_capital_usd if chips_mode else current_capital
+
+        sug_max_loss_cap = _pct_of_capital(_sug_budget)
 
         def _f(val):
             try:
@@ -4288,7 +4441,7 @@ class LinupApp:
                 total_8x = b * 18 * 8
                 total    = total_1x + total_2x + total_4x + total_8x
                 pct_bank = (total / bank * 100) if bank > 0 else 0
-                pct_cap  = (total / capital * 100) if capital > 0 else 0
+                pct_cap  = _pct_of_capital(total)
                 return (f"1x({total_1x:.2f}) + 2x({total_2x:.2f}) + 4x({total_4x:.2f})"
                         f" + 8x({total_8x:.2f})"
                         f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
@@ -4306,7 +4459,7 @@ class LinupApp:
                 total_27x = chip_val * 2 * 27
                 total    = total_1x + total_3x + total_9x + total_27x  # chip × 80
                 pct_bank = (total / bank * 100) if bank > 0 else 0
-                pct_cap  = (total / capital * 100) if capital > 0 else 0
+                pct_cap  = _pct_of_capital(total)
                 return (f"1x({total_1x:.2f}) + 3x({total_3x:.2f}) + 9x({total_9x:.2f})"
                         f" + 27x({total_27x:.2f})"
                         f" = {_amt(total)} · {pct_bank:.1f}% bank · {pct_cap:.1f}% capital")
@@ -4315,28 +4468,36 @@ class LinupApp:
 
         self.fin_label  = ft.Text(
             _chip_label_text_prog(_sug_chip_denom, sug_bank, sug_max_loss),
-            color='#27ae60',
+            color='#7f8c8d', size=11,
         )
         self.fout_label = ft.Text(
             _chip_label_text(sug_fout, sug_bank, sug_max_loss),
-            color='#f1c40f',
+            color='#7f8c8d', size=11,
         )
 
-        def _max_loss_info(bank, max_loss_pct):
-            try:
-                loss_amt = bank * max_loss_pct / 100
-                cap_pct  = (loss_amt / capital * 100) if capital > 0 else 0
-                return f"MAX LOSS %:  (= {_amt(loss_amt)} · {cap_pct:.1f}% of capital)"
-            except Exception:
-                return "MAX LOSS %:"
+        def _max_loss_info(amt_str):
+            return f"= {amt_str}"
 
         def _refresh_labels(bank, base_chip_val, fout_val):
-            ml = _f(self.max_loss_input.value)
-            self.max_loss_label.value = _max_loss_info(bank, ml)
-            self.fin_label.value  = _chip_label_text_prog(base_chip_val, bank, ml)
-            self.fout_label.value = _chip_label_text(fout_val, bank, ml)
+            # bank's MAX LOSS % is the source of truth for the $ budget (it
+            # also drives the live pre-bet warning); capital's % is the same
+            # $ budget re-expressed against total capital — kept in sync here.
+            # Capital may span several tokens for CHIPS investments, so its
+            # amount/% must go through USD (_pct_of_capital / _cap_basis),
+            # never a raw chip-count ratio against this table's native budget.
+            ml_bank = _f(self.max_loss_bank_input.value)
+            budget  = bank * max(ml_bank, 0) / 100
+            ml_cap  = _pct_of_capital(budget)
+            self.max_loss_cap_input.value  = _fmt_pct(ml_cap)
+            self.max_loss_bank_label.value = _max_loss_info(_amt(budget))
+            self.max_loss_cap_label.value  = _max_loss_info(
+                f"${_cap_basis() * ml_cap / 100:,.2f}")
+            self.fin_label.value  = _chip_label_text_prog(base_chip_val, bank, ml_bank)
+            self.fout_label.value = _chip_label_text(fout_val, bank, ml_bank)
             try:
-                self.max_loss_label.update()
+                self.max_loss_cap_input.update()
+                self.max_loss_bank_label.update()
+                self.max_loss_cap_label.update()
                 self.fin_label.update()
                 self.fout_label.update()
             except Exception:
@@ -4365,14 +4526,14 @@ class LinupApp:
         # Editing any field re-derives the others; chips stay multiples of the
         # base chip and are floored so the budget never exceeds MAX LOSS.
         def _recalc_fin(e=None):
-            """Bank / Base Chip / Max Loss changed → re-derive both chips from budget."""
+            """Bank / Base Chip / Max Loss (of BANK) changed → re-derive both chips from budget."""
             if _busy[0]:
                 return
             _busy[0] = True
             try:
                 bk   = _f(self.banca_input.value)
                 base = _f(self.fin_base_input.value)
-                ml   = _f(self.max_loss_input.value)
+                ml   = _f(self.max_loss_bank_input.value)
                 budget = bk * max(ml, 0) / 100
                 if bk > 0 and budget > 0:
                     cin  = _snap_to_base(budget / 270, base)  # CHIP IN: 270 chips
@@ -4389,18 +4550,54 @@ class LinupApp:
             finally:
                 _busy[0] = False
 
+        def _on_cap_pct_change(e=None):
+            """Max Loss (of CAPITAL) changed → re-derive budget from capital,
+            push the implied bank-relative %, and re-derive both chips."""
+            if _busy[0]:
+                return
+            _busy[0] = True
+            try:
+                bk     = _f(self.banca_input.value)
+                base   = _f(self.fin_base_input.value)
+                ml_cap = _f(self.max_loss_cap_input.value)
+                # Budget in capital's own unit (USD for CHIPS, $ for FIAT),
+                # then converted to THIS table's native chip unit so the
+                # chip fields below stay in the right token's denomination.
+                budget_cap_unit = _cap_basis() * max(ml_cap, 0) / 100
+                if chips_mode:
+                    budget = (budget_cap_unit / usd_per_chip) if usd_per_chip > 0 else 0.0
+                else:
+                    budget = budget_cap_unit
+                if budget > 0:
+                    cin  = _snap_to_base(budget / 270, base)
+                    cout = _snap_to_base(budget / 80, base)
+                else:
+                    cin = cout = max(base, 0.0)
+                ml_bank = (budget / bk * 100) if bk > 0 else 0.0
+                self.max_loss_bank_input.value = _fmt_pct(ml_bank)
+                self.max_loss_bank_input.update()
+                self.fin_input.value  = _fmt(cin)
+                self.fout_input.value = _fmt(cout)
+                self.fin_input.update()
+                self.fout_input.update()
+                _refresh_labels(bk, cin, cout)
+            except Exception:
+                pass
+            finally:
+                _busy[0] = False
+
         def _sync_from_chip(chip_val, chips_per_total):
             """A chip was edited → back-solve the shared budget, push the implied
-            MAX LOSS %, and return the re-derived chips. chips_per_total is
-            270 (CHIP IN) or 80 (CHIP OUT)."""
+            MAX LOSS % (of bank), and return the re-derived chips. chips_per_total
+            is 270 (CHIP IN) or 80 (CHIP OUT)."""
             bk   = _f(self.banca_input.value)
             base = _f(self.fin_base_input.value)
             budget = max(chip_val, 0.0) * chips_per_total
             ml   = (budget / bk * 100) if bk > 0 else 0.0
             cin  = _snap_to_base(budget / 270, base) if budget > 0 else max(base, 0.0)
             cout = _snap_to_base(budget / 80, base) if budget > 0 else max(base, 0.0)
-            self.max_loss_input.value = _fmt_pct(ml)
-            self.max_loss_input.update()
+            self.max_loss_bank_input.value = _fmt_pct(ml)
+            self.max_loss_bank_input.update()
             return bk, cin, cout
 
         def _on_chip_in_change(e=None):
@@ -4452,20 +4649,49 @@ class LinupApp:
             _on_chip_out_change()
 
         def _on_bank_change(e):
+            nonlocal current_capital, current_capital_usd
             try:
                 new_bank = float(self.banca_input.value or 0)
                 if new_bank > 0:
                     self.banca_actual  = new_bank
                     self.banca_inicial = new_bank
+                self.table_bank_header_label.value = _table_bank_header_text(new_bank)
+                self.table_bank_header_label.update()
+                if chips_mode:
+                    self.bank_usd_label.value = f"≈ ${new_bank * usd_per_chip:,.2f}"
+                    self.bank_usd_label.update()
+                # CURRENT capital IS the live sum of every table's bank, so
+                # editing THIS table's bank must re-derive the total live
+                # (other tables' contribution was set aside at load time).
+                # INITIAL capital (self.inv_capital) never changes here.
+                current_capital     = self.inv_other_current_capital + new_bank
+                current_capital_usd = self.inv_other_current_capital_usd + new_bank * usd_per_chip
+                self.inv_current_capital     = current_capital
+                self.inv_current_capital_usd = current_capital_usd
+                self.capital_header_label.value = _current_capital_text(current_capital, current_capital_usd)
+                self.capital_header_label.update()
             except ValueError:
                 pass
             _recalc_fin()
 
-        self.max_loss_label = ft.Text(
-            _max_loss_info(sug_bank, sug_max_loss),
-            color='#e74c3c',
+        # CAPITAL row — darker red input only; explanation text stays small/regular
+        self.max_loss_cap_label = ft.Text(
+            _max_loss_info(f"${_cap_basis() * sug_max_loss_cap / 100:,.2f}"),
+            color='#7f8c8d', size=11,
         )
-        self.max_loss_input = ft.TextField(
+        self.max_loss_cap_input = ft.TextField(
+            value=str(round(sug_max_loss_cap, 2)),
+            bgcolor='#cd6155', color=ft.Colors.BLACK, height=45,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_change=lambda e: _on_cap_pct_change(),
+        )
+
+        # BANK row — lighter red
+        self.max_loss_bank_label = ft.Text(
+            _max_loss_info(_amt(_sug_budget)),
+            color='#7f8c8d', size=11,
+        )
+        self.max_loss_bank_input = ft.TextField(
             value=str(sug_max_loss),
             bgcolor='#f1948a', color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -4499,6 +4725,13 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
             on_change=_on_bank_change,
+        )
+        # Chips-mode only: live USD equivalent of the bank, at THIS table's
+        # own rate (a single table's chips are one token, so no blending
+        # needed here — unlike the cross-table CAPITAL figure above).
+        self.bank_usd_label = ft.Text(
+            (f"≈ ${sug_bank * usd_per_chip:,.2f}" if chips_mode else ""),
+            color='#7f8c8d', size=11,
         )
         self.free_spin_mode = False
         _fs_lbl = ft.Text("FREE SPIN: OFF", color=ft.Colors.WHITE,
@@ -4623,28 +4856,47 @@ class LinupApp:
                             style=ft.ButtonStyle(bgcolor='#c0392b',
                                                  color=ft.Colors.WHITE),
                         ),
-                        ft.Container(height=10),
-                        ft.Text("TABLE:", color=ft.Colors.WHITE),
-                        self.table_input,
-                        ft.Text("CAPITAL:", color=ft.Colors.WHITE),
-                        ft.TextField(
-                            value=(f"{capital:,.0f} chips (${capital * usd_per_chip:,.2f})"
-                                   if chips_mode else f"${capital:.2f}"),
-                            bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
-                            read_only=True,
-                        ),
-                        ft.Text("BANK:", color=ft.Colors.WHITE),
+                        ft.Container(height=14),
+
+                        # ── Header: read-only context, bold/bigger, no boxes ──
+                        ft.Row([self.capital_initial_label], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([self.capital_header_label], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([self.table_bank_header_label], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Container(height=18),
+
+                        # ── Modifiable fields: title (bold/bigger), explanation
+                        #    (regular/smaller), then the editable input line ──
+                        ft.Text("BANK", size=15, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                        self.bank_usd_label,
                         self.banca_input,
-                        ft.Text("Base Chip:", color='#7f8c8d', size=11),
+                        ft.Container(height=12),
+
+                        ft.Text("BASE CHIP", size=15, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                        ft.Text("Smallest chip denomination for bets on this table.",
+                                size=11, color='#7f8c8d'),
                         self.fin_base_input,
-                        self.max_loss_label,
-                        self.max_loss_input,
-                        ft.Text("CHIP IN — investment of 18 chips (1x · 2x · 4x · 8x)", color='#27ae60', size=12,
-                                weight=ft.FontWeight.BOLD),
+                        ft.Container(height=12),
+
+                        ft.Text("MAX LOSS % OF CAPITAL", size=15, weight=ft.FontWeight.BOLD, color='#e74c3c'),
+                        self.max_loss_cap_label,
+                        self.max_loss_cap_input,
+                        ft.Container(height=12),
+
+                        ft.Text("MAX LOSS % OF BANK", size=15, weight=ft.FontWeight.BOLD, color='#e74c3c'),
+                        self.max_loss_bank_label,
+                        self.max_loss_bank_input,
+                        ft.Container(height=12),
+
+                        ft.Text("CHIP IN", size=15, weight=ft.FontWeight.BOLD, color='#27ae60'),
+                        ft.Text("Investment of 18 chips, 4-step recovering ladder (1x · 2x · 4x · 8x).",
+                                size=11, color='#7f8c8d'),
                         self.fin_label,
                         self.fin_input,
-                        ft.Text("CHIP OUT — 2 chips · progression (1x · 3x · 9x · 27x)", color='#f1c40f', size=12,
-                                weight=ft.FontWeight.BOLD),
+                        ft.Container(height=12),
+
+                        ft.Text("CHIP OUT", size=15, weight=ft.FontWeight.BOLD, color='#f1c40f'),
+                        ft.Text("2 chips, 4-step recovering ladder (1x · 3x · 9x · 27x).",
+                                size=11, color='#7f8c8d'),
                         self.fout_label,
                         self.fout_input,
                         ft.Container(height=10),
@@ -4685,14 +4937,14 @@ class LinupApp:
                 self.play_session_id = datetime.now().strftime('%Y%m%d-%H%M%S')
             except Exception:
                 self.play_session_id = str(len(getattr(self, 'history_nums', [])))
-            self.nombre_mesa   = str(self.table_input.value).upper() or "TABLE 1"
+            self.nombre_mesa   = str(self.nombre_mesa).upper() or "TABLE 1"
             self.banca_inicial = float(self.banca_input.value or 100)
             self.banca_actual  = self.banca_inicial
             
             # CHIP IN is calculated from progression
             self.val_fin       = float(self.fin_input.value)  if self.fin_input.value  else 0.5
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else 0.5
-            self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 2.0
+            self.last_max_loss = float(self.max_loss_bank_input.value) if self.max_loss_bank_input.value else 2.0
             self.last_base_chip = float(self.fin_base_input.value) if self.fin_base_input.value else 0.1
             # Remember this base chip for THIS table specifically
             self._save_base_chip(getattr(self, 'current_investment_id', 0),
@@ -4952,9 +5204,10 @@ class LinupApp:
         # ── Investment bar (shown only when inside an investment) ───
         inv_bar_controls = []
         if self.current_investment_id and self.inv_name:
-            init_pl = self.inv_other_pl + (self.banca_actual - self.banca_inicial)
+            init_pl, init_pl_pct = self._capital_pl_amt_pct(self.banca_actual - self.banca_inicial)
+            init_sign = "+" if init_pl >= 0 else ""
             self.lbl_inv_pl = ft.Text(
-                f"P/L: {init_pl:+.2f}",
+                f"CAPITAL P/L: {init_sign}${init_pl:,.2f} ({init_sign}{init_pl_pct:.1f}%)",
                 color='#2ecc71' if init_pl >= 0 else '#ff4444',
                 weight=ft.FontWeight.BOLD, size=16,
                 text_align=ft.TextAlign.RIGHT,
@@ -7432,6 +7685,21 @@ class LinupApp:
         else:
             self.lbl_inv.value = f"BET: {self._fmt_chip(0)}"
 
+    def _capital_pl_amt_pct(self, pl_native):
+        """Combine this table's P/L (native units) with the other tables'
+        P/L (self.inv_other_pl) in ONE comparable unit — USD for CHIPS
+        investments (different tables may use different tokens, so their
+        native chip P/L isn't directly addable) or native $ for FIAT — and
+        express the result as a % of the whole investment's capital."""
+        if getattr(self, 'inv_type', 'FIAT') == 'CHIPS':
+            amt   = self.inv_other_pl + pl_native * getattr(self, 'chip_usd_rate', 0.0)
+            basis = getattr(self, 'inv_capital_usd', 0.0)
+        else:
+            amt   = self.inv_other_pl + pl_native
+            basis = getattr(self, 'inv_capital', 0.0)
+        pct = (amt / basis * 100) if basis else 0.0
+        return amt, pct
+
     def update_ui(self):
         if not self.lbl_bank:
             return
@@ -7444,12 +7712,13 @@ class LinupApp:
             displayed_bank -= pending_cost
         pl_pct = (pl / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
         self.lbl_bank.value = f"{self.nombre_mesa}  |  {self._fmt_bank(displayed_bank)}"
-        self.lbl_pl.value   = f"P/L: {pl_pct:+.1f}%"
+        self.lbl_pl.value   = f"BANK P/L: {pl_pct:+.1f}%"
         self.lbl_pl.color   = '#2ecc71' if pl >= 0 else '#ff4444'
         self.update_inv_label()
         if self.lbl_inv_pl:
-            total_pl = self.inv_other_pl + pl
-            self.lbl_inv_pl.value = f"P/L: {total_pl:+.2f}"
+            total_pl, total_pl_pct = self._capital_pl_amt_pct(pl)
+            sign = "+" if total_pl >= 0 else ""
+            self.lbl_inv_pl.value = f"CAPITAL P/L: {sign}${total_pl:,.2f} ({sign}{total_pl_pct:.1f}%)"
             self.lbl_inv_pl.color = '#2ecc71' if total_pl >= 0 else '#ff4444'
         self.page.update()
         self._check_stop_loss()
