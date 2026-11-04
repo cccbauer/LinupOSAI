@@ -266,7 +266,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v19.1.21-AI"
+        self.page.title      = "Linup v19.1.22-AI"
         self.page.window.icon = "app_icon.png"   # no-op on macOS in flet>=0.80
                                                    # (Window.icon is Windows-only
                                                    # now); real app icon comes
@@ -897,7 +897,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v19.1.21-AI", color='#9b59b6', size=18),
+                        ft.Text("v19.1.22-AI", color='#9b59b6', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -5484,10 +5484,10 @@ class LinupApp:
             row_btns = []
             for g in grps:
                 btn = ft.ElevatedButton(
-                    content=self._txt(g),
+                    content=self._txt(g, size=12),
                     data={'name': g, 'color': col},
                     on_click=self.seleccionar_mixer,
-                    expand=True, height=40,
+                    expand=True, height=32,
                     style=ft.ButtonStyle(
                         bgcolor=col, color=ft.Colors.WHITE,
                         animation_duration=400,
@@ -5531,7 +5531,7 @@ class LinupApp:
                         content=self._txt(g, size=text_size),
                         data={'name': g, 'color': btn_color},
                         on_click=self.seleccionar_mixer,
-                        width=40, height=40,
+                        width=32, height=32,
                         style=ft.ButtonStyle(
                             bgcolor=btn_color, color=ft.Colors.WHITE,
                             animation_duration=400,
@@ -5547,7 +5547,7 @@ class LinupApp:
                         content=self._txt(g, size=text_size),
                         data={'name': g, 'color': btn_color},
                         on_click=self.seleccionar_mixer,
-                        expand=btn_expand, height=40,
+                        expand=btn_expand, height=32,
                         style=ft.ButtonStyle(
                             bgcolor=btn_color, color=ft.Colors.WHITE,
                             animation_duration=400,
@@ -5641,8 +5641,13 @@ class LinupApp:
                 )
             teclado_controls.append(ft.Row(controls=row_btns, spacing=2))
 
+        # No fixed height: it shares the screen's remaining space with
+        # bitacora below (3:2 ratio) instead of each other, hard-coded
+        # heights that comfortably fit a desktop window but together
+        # exceed a phone screen's height, forcing the keypad down to a
+        # sliver that then needs scrolling for every row.
         teclado = ft.Container(
-            bgcolor='#0e3d24', padding=5, height=620,
+            bgcolor='#0e3d24', padding=5,
             content=ft.Column(controls=teclado_controls, spacing=2),
         )
 
@@ -5651,7 +5656,7 @@ class LinupApp:
         self._rebuild_table_header()
 
         bitacora = ft.Container(
-            height=300, bgcolor='#0d0d0d',
+            bgcolor='#0d0d0d',
             content=ft.Column(
                 spacing=0,
                 controls=[
@@ -5676,10 +5681,10 @@ class LinupApp:
                     ] + ([rb_bar] if rb_bar else []) + [
                         mixer_box, ctrl_bar,
                         ft.Container(
-                            expand=True,
+                            expand=3,
                             content=ft.ListView(expand=True, controls=[teclado]),
                         ),
-                        bitacora,
+                        ft.Container(expand=2, content=bitacora),
                     ],
                 ),
             )
