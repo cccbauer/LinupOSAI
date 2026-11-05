@@ -33,12 +33,19 @@ _UUID_EXPR = (
 # child table -> columns that make up the synced payload
 _CHILDREN = {
     "investment_tables": ("mesa_name", "init_bank", "token_symbol",
-                          "token_balance", "token_price", "chips_per_token"),
+                          "token_balance", "token_price", "chips_per_token",
+                          "table_type"),
     "compound_sessions": ("session_num", "date", "mesa", "bank_start",
                           "bank_end", "profit", "profit_pct"),
     "table_stats": ("mesa", "wins", "losses", "last_bank", "base_chip"),
 }
 _INV_COLS = ("name", "capital", "created_at", "inv_type")
+
+
+def _cols(conn, table):
+    """Synced columns that exist in this DB (older app versions lack some)."""
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    return tuple(c for c in _CHILDREN[table] if c in have)
 
 
 def _parse_ts(s):
@@ -121,7 +128,8 @@ def export_investment(conn, inv_id):
         f"SELECT {','.join(_INV_COLS)} FROM investments WHERE id=?",
         (inv_id,)).fetchone()
     doc = dict(zip(_INV_COLS, row))
-    for table, cols in _CHILDREN.items():
+    for table in _CHILDREN:
+        cols = _cols(conn, table)
         cur = conn.execute(
             f"SELECT {','.join(cols)} FROM {table} WHERE investment_id=? ORDER BY id"
             if table != "table_stats" else
@@ -154,7 +162,8 @@ def apply_investment(conn, uuid, doc, updated_at):
                 "INSERT INTO investments (name, capital, created_at, inv_type, "
                 "uuid, updated_at) VALUES (?,?,?,?,?,?)", (*vals, uuid, updated_at))
             inv_id = cur.lastrowid
-        for table, cols in _CHILDREN.items():
+        for table in _CHILDREN:
+            cols = _cols(conn, table)
             for item in doc.get(table, []):
                 conn.execute(
                     f"INSERT INTO {table} (investment_id,{','.join(cols)}) "

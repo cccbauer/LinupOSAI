@@ -5,7 +5,7 @@ import linup_sync as ls
 
 SCHEMA = """
 CREATE TABLE investments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, capital REAL, created_at TEXT, inv_type TEXT DEFAULT 'FIAT');
-CREATE TABLE investment_tables (id INTEGER PRIMARY KEY AUTOINCREMENT, investment_id INTEGER, mesa_name TEXT, init_bank REAL, token_symbol TEXT DEFAULT '', token_balance REAL DEFAULT 0, token_price REAL DEFAULT 0, chips_per_token REAL DEFAULT 0);
+CREATE TABLE investment_tables (id INTEGER PRIMARY KEY AUTOINCREMENT, investment_id INTEGER, mesa_name TEXT, init_bank REAL, token_symbol TEXT DEFAULT '', token_balance REAL DEFAULT 0, token_price REAL DEFAULT 0, chips_per_token REAL DEFAULT 0, table_type TEXT DEFAULT '');
 CREATE TABLE compound_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, investment_id INTEGER NOT NULL DEFAULT 0, session_num INTEGER, date TEXT, mesa TEXT, bank_start REAL, bank_end REAL, profit REAL, profit_pct REAL);
 CREATE TABLE table_stats (investment_id INTEGER NOT NULL DEFAULT 0, mesa TEXT NOT NULL, wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0, last_bank REAL DEFAULT 0, base_chip REAL DEFAULT 0, PRIMARY KEY (investment_id, mesa));
 """
@@ -48,6 +48,10 @@ assert q(B, "SELECT COUNT(*) FROM compound_sessions")[0][0] == 1
 # pulling must not look like a local edit -> second sync is a no-op both ways
 assert ls.SyncEngine(B, cloud).sync() == dict(pushed=0, pulled=0, deleted_remote=0, deleted_local=0)
 assert ls.SyncEngine(A, cloud).sync() == dict(pushed=0, pulled=0, deleted_remote=0, deleted_local=0)
+
+assert q(B, "SELECT table_type FROM investment_tables") == [('',)]
+q(A, "UPDATE investment_tables SET table_type='CHIPS'"); ls.SyncEngine(A, cloud).sync(); ls.SyncEngine(B, cloud).sync()
+assert q(B, "SELECT table_type FROM investment_tables") == [('CHIPS',)], 'table_type not synced'
 
 # 2. child-row edit on B (a new session) bumps parent -> propagates to A
 time.sleep(0.01)
