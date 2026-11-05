@@ -16,6 +16,7 @@ from ai_game_state import GameStateExtractor
 from ai_strategy_model import StrategyModel, MIN_TRAINED_OBS
 from ai_rhythm import RhythmModel, RHYTHM_WARMUP
 from ai_pattern import PatternDetector, PATTERN_WARMUP
+from linup_account import AccountMixin
 try:
     from ai_decision_tracker import DecisionTracker, Decision
     _HAS_DECISION_TRACKER = True
@@ -249,7 +250,7 @@ def regime_status(history):
     return "no clear regime — dozen only"
 
 
-class LinupApp:
+class LinupApp(AccountMixin):
     def __init__(self, page: ft.Page):
         self.page = page
 
@@ -318,6 +319,7 @@ class LinupApp:
 
         self.show_splash()
         self.init_db()
+        self.init_cloud()            # accounts + cross-device sync
         self.reset_variables()
         self._init_ai_systems()      # AI: combination-choice learning
         self.page.run_task(self._after_splash)
@@ -353,7 +355,12 @@ class LinupApp:
 
     async def _after_splash(self):
         await asyncio.sleep(4.0)
+        if self.cloud_enabled and not self.cloud_auth.signed_in:
+            self.show_account_screen()
+            return
         self.show_main_menu()
+        if self.cloud_enabled:
+            await self._sync_then_refresh_menu(force=True)
 
     # ──────────────────────────────────────────────────────────────────
     # TEXT HELPER
@@ -912,7 +919,7 @@ class LinupApp:
     def show_main_menu(self, e=None):
         self._on_game_screen = False
         self.current_investment_id = None
-        self._set_view(
+        self._menu_container = (
             ft.Container(
                 bgcolor='#1a1a1a', expand=True, padding=20,
                 content=ft.Column(
@@ -938,10 +945,13 @@ class LinupApp:
                             style=ft.ButtonStyle(bgcolor='#2980b9',
                                                  color=ft.Colors.WHITE),
                         ),
-                    ],
+                    ] + self.account_menu_controls(),
                 ),
             )
         )
+        self._set_view(self._menu_container)
+        if self.cloud_enabled and self.cloud_auth.signed_in:
+            self.page.run_task(self._sync_then_refresh_menu)   # debounced
 
     # ──────────────────────────────────────────────────────────────────
     # NEW INVESTMENT — Step 1: name + capital
